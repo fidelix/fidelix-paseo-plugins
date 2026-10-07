@@ -17,6 +17,18 @@ export interface CursorSdkModule {
     models: {
       list(options?: Record<string, unknown>): Promise<unknown>;
     };
+    auth: {
+      login(options?: Record<string, unknown>): Promise<{
+        apiKey?: string;
+        email?: string;
+        apiKeyExpiresAtMs?: number;
+      }>;
+      status(options?: Record<string, unknown>): Promise<
+        | { status: "logged-out" }
+        | { status: "logged-in"; backendUrl?: string; email?: string; apiKeyExpiresAtMs?: number }
+      >;
+      logout(options?: Record<string, unknown>): Promise<void>;
+    };
   };
   JsonlLocalAgentStore: new (rootDir: string) => unknown;
 }

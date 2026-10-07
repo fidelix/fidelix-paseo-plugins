@@ -234,11 +234,14 @@ export function createCursorProvider(options: ProviderOptions = {}): {
         throw new Error("Provider protocol version 1 is required");
       }
       // Auth resolution is async (host-scoped settings); warn instead of
-      // failing here so sessions can still open once a key is saved.
+      // failing here so sessions can still open once a key is saved. Note
+      // the SDK also falls back to a stored Cursor.auth.login() key on its
+      // own, which this check cannot see — absence of a warning is not a
+      // guarantee, and presence of one is not fatal if login exists.
       void readStoredApiKey(settings).then((key) => {
-        if (!key && !readProcessApiKey()) {
+        if (!key) {
           console.error(
-            "cursor-sdk provider: no API key in plugin settings or daemon environment; save one in the Cursor settings screen or export CURSOR_API_KEY",
+            "cursor-sdk provider: no API key in plugin settings; save one in the Cursor settings screen, sign in there, or export CURSOR_API_KEY",
           );
         }
       });
@@ -419,9 +422,14 @@ function createConnection(
   }
 
   async function readKey(config: ProviderSessionConfig): Promise<string | undefined> {
+    // Explicit overrides only. When nothing is configured, callers omit
+    // apiKey so the SDK falls back to CURSOR_API_KEY / stored login itself.
+    // (Daemon process env is NOT read here: explicit empty env would bypass
+    // the SDK fallback, and the daemon env belongs to the daemon host, not
+    // the provider session.)
     const fromEnv = config.env["CURSOR_API_KEY"];
     if (fromEnv && fromEnv.length > 0) return fromEnv;
-    return (await readStoredApiKey(settings)) ?? readProcessApiKey();
+    return readStoredApiKey(settings);
   }
 
   function readCache(): { models: ProviderModel[]; raw: CursorModelListItem[] } | null {
@@ -440,10 +448,15 @@ function createConnection(
   ): Promise<{ models: ProviderModel[]; raw: CursorModelListItem[] }> {
     const cached = readCache();
     if (cached) return { models: cached.models, raw: cached.raw };
+    // No explicit key required: the SDK falls back to CURSOR_API_KEY and
+    // then the stored Cursor.auth.login() key by itself. Pass it through
+    // only when the user configured one explicitly (env override, plugin
+    // settings); otherwise omit it so the SDK's own fallback chain runs.
     const apiKey = await readKey(config);
-    if (!apiKey) throw new Error("Set CURSOR_API_KEY to use the Cursor provider");
     const { Cursor } = loadCursorSdk();
-    const raw = (await Cursor.models.list({ apiKey })) as CursorModelListItem[];
+    const raw = (await Cursor.models.list(
+      apiKey ? { apiKey } : {},
+    )) as CursorModelListItem[];
     const written = writeCache(toProviderModels(raw), raw);
     return { models: written.models, raw: written.raw };
   }
@@ -456,14 +469,15 @@ function createConnection(
     }
     switch (input.type) {
       case "catalog": {
+        // Same fallback as ensureCatalog: explicit key when configured,
+        // otherwise let the SDK use CURSOR_API_KEY / stored login itself.
+        // No key anywhere just fails the list call, which falls back below.
         const apiKey = (await readStoredApiKey(settings)) ?? readProcessApiKey();
-        if (!apiKey) {
-          emit({ type: "catalog", requestId: input.requestId, catalog: fallbackCatalog() });
-          return;
-        }
         try {
           const { Cursor } = loadCursorSdk();
-          const raw = (await Cursor.models.list({ apiKey })) as CursorModelListItem[];
+          const raw = (await Cursor.models.list(
+            apiKey ? { apiKey } : {},
+          )) as CursorModelListItem[];
           const cached = writeCache(toProviderModels(raw), raw);
           emit({
             type: "catalog",
@@ -629,8 +643,9 @@ function createConnection(
     requestId: string,
   ): Promise<void> {
     const { Agent } = loadCursorSdk();
+    // Explicit key when configured; otherwise omit so the SDK falls back to
+    // CURSOR_API_KEY / stored login itself.
     const apiKey = await readKey(config);
-    if (!apiKey) throw new Error("Set CURSOR_API_KEY to use the Cursor provider");
     const store = openStore(config);
     const persistedAgentId = persistence
       ? persistenceSchema.parse(persistence).data.agentId
@@ -639,13 +654,13 @@ function createConnection(
     const agent = (
       persistedAgentId
         ? await Agent.resume(persistedAgentId, {
-            apiKey,
+            ...(apiKey ? { apiKey } : {}),
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
             local: { cwd: config.cwd, store },
           })
         : await Agent.create({
-            apiKey,
+            ...(apiKey ? { apiKey } : {}),
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
             local: {
@@ -1321,13 +1336,12 @@ function createConnection(
     // daemon replays prefix history from its own timeline store.
     const { Agent } = loadCursorSdk();
     const apiKey = await readKey(state.config);
-    if (!apiKey) throw new Error("Set CURSOR_API_KEY to use the Cursor provider");
     const store = openStore(state.config);
     // Re-create honors the same tool restriction as openSession (tools are
     // not persisted by the SDK; the reverted runtime must re-apply them).
     const tools = sessionTools(state);
     state.agent = (await Agent.create({
-      apiKey,
+      ...(apiKey ? { apiKey } : {}),
       model: resolveModelSelection(state),
       ...(tools ? { tools } : {}),
       local: {
