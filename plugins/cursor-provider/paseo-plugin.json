@@ -1,0 +1,14 @@
+{
+  "id": "cursor-provider",
+  "description": "Cursor coding agent via the official Cursor SDK (local runtime), with retriable-failure detection and retry",
+  "requirements": {
+    "paseo": ">=0.10.3"
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--omit=dev"
+    ]
+  ]
+}
