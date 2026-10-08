@@ -59,6 +59,11 @@ Override the root with `CURSOR_SDK_STATE_ROOT` (per-agent env or daemon env).
 - `agent` / `plan` modes, switchable mid-session; model switch applies on next prompt.
 - Live model catalog via `Cursor.models.list` (single `composer-2.5` fallback when
   keyless or the list call fails).
+- Per-model reasoning effort: the thinking dropdown lists the model's effort
+  values (`low`/`medium`/`high`/`xhigh`/`max`, `reasoning` variants, or `On`/`Off`
+  for older `thinking` models), defaulting to the model's default variant.
+- Fast select (`Off`/`Fast`) on models that expose a `fast` parameter; hidden
+  otherwise. Unset follows the model's default variant.
 - MCP servers (stdio + http/sse) passed through to the SDK.
 - Session persistence / listing / configure; usage reporting
   (input, cached-input, output tokens).
@@ -92,9 +97,12 @@ Override the root with `CURSOR_SDK_STATE_ROOT` (per-agent env or daemon env).
 - **Local runs auto-approve tools.** The SDK headless runtime executes tool calls
   without interactive approval. `session.permission` `deny` only cancels the active
   run; `question`-type input requests are surfaced as a `cursor-input` prompt.
-- **No thinking options.** Reasoning effort is selected through the model choice;
-  configuring a thinking option throws. There is one composer toggle,
-  `autoReview`, mapped to the SDK's classifier-backed Auto mode.
+- **Reasoning effort is a value dropdown, fast is a select.** Thinking options
+  are the model's effort-param *values* (e.g. `low`…`max`), never parameter
+  ids (`effort`, `context`) or other models' values — switching models re-keys
+  to the new model's default. `context` (window size) always follows the
+  default variant; `fast` is a separate `Off`/`Fast` select shown only on
+  models that expose it, and unset follows the default variant.
 - History replay on resume is best-effort (last ~20 messages) and never blocks
   session open.
 
@@ -109,8 +117,8 @@ The built-in provider shells out to `cursor-agent acp`
 | `agent` / `plan` modes | Yes | Yes | Works |
 | MCP servers | Yes | Yes (stdio + http/sse) | Works |
 | Session persistence / listing | Yes | Yes (local JSONL store) | Works |
-| Model catalog | Live, per-model `thought_level` thinking options | Live list, **no** thinking options | Degraded |
-| Fast mode toggle | Yes (`fast` feature) | Missing | Missing |
+| Model catalog | Live, per-model `thought_level` thinking options | Live list, per-model effort-value thinking dropdown | Works |
+| Fast mode toggle | Yes (`fast` feature) | Yes (`Off`/`Fast` select, only on models with a `fast` param) | Works |
 | Slash commands | Dynamic via `available_commands_update` | Static `/plan` `/compact` `/review` `/commit` | Degraded |
 | Tool approval | ACP permission-request flow | Auto-executed; deny cancels run; input questions surfaced | Degraded |
 | Revert | None (`supportsRewind*` all false) | Conversation-only (close + fresh agent; `files`/`both` throw) | Works, limited |
