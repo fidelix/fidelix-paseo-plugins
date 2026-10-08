@@ -79,8 +79,175 @@ export function isAskLikeMode(mode: string | undefined): boolean {
 
 /** Settings rendered in the composer. autoReview maps to Cursor's classifier-backed Auto mode. */
 export const CURSOR_SETTING_AUTO_REVIEW = "autoReview";
-/** Fast toggle: when true, appends/overrides the fast param on models that offer one. */
+/**
+ * Fast mode for models that expose a `fast` parameter. Rendered as a select
+ * (Off/Fast) — not a toggle — because plugin settings carry no icon and two
+ * toggles render as two identical gear buttons. Mirrors the built-in `cursor`
+ * ACP provider, where fast is also a select.
+ */
 export const CURSOR_SETTING_FAST = "fast";
+
+/** Fast select values (select settings carry string ids, not booleans). */
+export const CURSOR_FAST_OFF = "false";
+export const CURSOR_FAST_ON = "true";
+
+/**
+ * Model parameter ids that select reasoning effort, in preference order. The
+ * SDK uses one effort-like id per model (`effort`, `reasoning`, or
+ * `reasoning_effort`); older Claude models carry only the boolean `thinking`
+ * flag, which is the fallback. `context` (window size) and `fast` are never
+ * thinking — context stays on its default variant, fast has its own select.
+ */
+const EFFORT_PARAM_IDS = ["effort", "reasoning", "reasoning_effort"];
+
+export function findRawModel(
+  rawModels: CursorModelListItem[] | undefined,
+  modelId: string | undefined,
+): CursorModelListItem | undefined {
+  if (!modelId) return undefined;
+  return rawModels?.find((item) => item.id === modelId || item.aliases?.includes(modelId));
+}
+
+/** The reasoning-effort parameter for a model, if it has one. */
+export function thinkingParamForModel(
+  raw: CursorModelListItem | undefined,
+): CursorModelParameter | undefined {
+  if (!raw) return undefined;
+  const params = raw.parameters ?? [];
+  for (const id of EFFORT_PARAM_IDS) {
+    const match = params.find((parameter) => parameter.id.toLowerCase() === id);
+    if (match) return match;
+  }
+  return params.find((parameter) => parameter.id.toLowerCase() === "thinking");
+}
+
+/** The `fast` parameter for a model, if it exposes one. */
+export function fastParamForModel(
+  raw: CursorModelListItem | undefined,
+): CursorModelParameter | undefined {
+  if (!raw) return undefined;
+  return (raw.parameters ?? []).find((parameter) => parameter.id.toLowerCase() === "fast");
+}
+
+function defaultVariantParamMap(raw: CursorModelListItem): Map<string, string> {
+  const merged = new Map<string, string>();
+  for (const variant of raw.variants ?? []) {
+    if (!variant.isDefault) continue;
+    for (const param of variant.params ?? []) merged.set(param.id, param.value);
+    break;
+  }
+  return merged;
+}
+
+/**
+ * Tri-state for the fast select: explicit on/off, or unset (follow the
+ * model's default variant). Accepts legacy booleans from the old toggle.
+ */
+export function fastSettingState(value: unknown): boolean | undefined {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return undefined;
+}
+
+/** Select `value` for the fast setting: "true" | "false" | null (unset). */
+export function fastSelectValue(value: unknown): string | null {
+  const state = fastSettingState(value);
+  if (state === true) return CURSOR_FAST_ON;
+  if (state === false) return CURSOR_FAST_OFF;
+  return null;
+}
+
+function fastParamValue(param: CursorModelParameter, enabled: boolean): string | undefined {
+  const values = param.values?.map((entry) => entry.value) ?? [];
+  if (values.length === 0) return enabled ? "true" : "false";
+  const want = enabled ? "true" : "false";
+  return (
+    values.find((value) => value === want) ??
+    values.find((value) => value.toLowerCase() === want)
+  );
+}
+
+/** Human label for a thinking value: SDK display name, else a formatted value. */
+function thinkingValueLabel(
+  param: CursorModelParameter,
+  entry: { value: string; displayName?: string },
+): string {
+  const raw = (entry.displayName ?? "").replace(/[\u200b-\u200f\ufeff]/g, "").trim();
+  if (raw.length > 0) return raw;
+  const lower = entry.value.toLowerCase();
+  if (param.id.toLowerCase() === "thinking") {
+    if (lower === "true") return "On";
+    if (lower === "false") return "Off";
+    return entry.value;
+  }
+  if (lower === "xhigh" || lower === "extra-high" || lower === "extrahigh") return "Extra High";
+  if (lower.length === 0) return entry.value;
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+/** Thinking dropdown entries for a model: its thinking param's values. */
+function thinkingOptionsForRaw(
+  item: CursorModelListItem,
+): ProviderModel["thinkingOptions"] {
+  const param = thinkingParamForModel(item);
+  const values = param?.values ?? [];
+  if (!param || values.length === 0) return undefined;
+  const current = defaultVariantParamMap(item).get(param.id);
+  return values.map((entry) => ({
+    id: entry.value,
+    label: thinkingValueLabel(param, entry),
+    ...(entry.value === current ? { isDefault: true } : {}),
+  }));
+}
+
+/** Default thinking value: the default variant's value for the thinking param. */
+function defaultThinkingValue(item: CursorModelListItem): string | undefined {
+  const param = thinkingParamForModel(item);
+  if (!param) return undefined;
+  const value = defaultVariantParamMap(item).get(param.id);
+  if (value === undefined) return undefined;
+  return (param.values ?? []).some((entry) => entry.value === value) ? value : undefined;
+}
+
+function canonicalThinkingValue(
+  param: CursorModelParameter,
+  thinking: string,
+): string | undefined {
+  const known = param.values?.map((entry) => entry.value) ?? [];
+  return (
+    known.find((value) => value === thinking) ??
+    known.find((value) => value.toLowerCase() === thinking.toLowerCase())
+  );
+}
+
+/**
+ * Selected thinking value for a model: the stored selection when it is still
+ * a known value, else the model default. Stale selections (e.g. param ids
+ * stored by the old build) fall back to the default instead of poisoning
+ * params or the dropdown.
+ */
+export function selectedThinkingOption(args: {
+  rawModels: CursorModelListItem[] | undefined;
+  modelId: string | undefined;
+  thinkingSelections: Record<string, string>;
+}): string | undefined {
+  const raw = findRawModel(args.rawModels, args.modelId);
+  if (!raw) return undefined;
+  const param = thinkingParamForModel(raw);
+  const stored =
+    args.thinkingSelections[raw.id] ??
+    (args.modelId ? args.thinkingSelections[args.modelId] : undefined);
+  if (stored !== undefined && param) {
+    const canonical = canonicalThinkingValue(param, stored);
+    if (canonical !== undefined) return canonical;
+  }
+  return defaultThinkingValue(raw);
+}
 
 export function findCursorModel(
   models: ProviderModel[],
@@ -93,50 +260,36 @@ export function findCursorModel(
 /**
  * Resolve the SDK `{ id, params }` selection for a model id against the
  * published catalog. Starts from the catalog entry's default variant params
- * (isDefault), applies per-model stored thinking params (a known parameter id
- * for this model, recorded by applyConfigure), then applies the fast toggle
- * when the model exposes a `fast` parameter. Returns undefined when the model
- * is unknown or has no params to send.
+ * (isDefault), applies the stored per-model thinking value (validated against
+ * the thinking param's known values; stale ids fall back to the default),
+ * then applies the fast select (explicit on/off only — unset follows the
+ * default variant). Returns undefined when the model is unknown or has no
+ * params to send.
  */
 export function resolveCursorModelParams(args: {
   modelId: string | undefined;
   rawModels: CursorModelListItem[] | undefined;
   thinkingSelections: Record<string, string>;
-  fast: boolean;
+  fast: unknown;
 }): { id: string; params: Array<{ id: string; value: string }> } | undefined {
-  const { modelId, rawModels, thinkingSelections, fast } = args;
+  const { modelId, rawModels, thinkingSelections } = args;
+  const fastState = fastSettingState(args.fast);
   if (!modelId) return undefined;
-  const raw = rawModels?.find(
-    (item) => item.id === modelId || item.aliases?.includes(modelId),
-  );
+  const raw = findRawModel(rawModels, modelId);
   if (!raw) return undefined;
-  const byId = new Map((raw.parameters ?? []).map((parameter) => [parameter.id, parameter]));
-  const merged = new Map<string, string>();
-  for (const variant of raw.variants ?? []) {
-    if (!variant.isDefault) continue;
-    for (const param of variant.params ?? []) merged.set(param.id, param.value);
-    break;
+  const merged = defaultVariantParamMap(raw);
+  const thinkingParam = thinkingParamForModel(raw);
+  if (thinkingParam) {
+    const stored = thinkingSelections[raw.id] ?? thinkingSelections[modelId];
+    const canonical = stored !== undefined ? canonicalThinkingValue(thinkingParam, stored) : undefined;
+    const value = canonical ?? defaultVariantParamMap(raw).get(thinkingParam.id);
+    if (value !== undefined) merged.set(thinkingParam.id, value);
   }
-  const thinking = thinkingSelections[raw.id] ?? thinkingSelections[modelId];
-  if (thinking !== undefined && modelId !== undefined) {
-    const known = [...byId.keys()].find(
-      (id) => id === thinking || id.toLowerCase() === thinking.toLowerCase(),
-    );
-    if (known) {
-      merged.set(
-        known,
-        thinkingIncludesValue(byId.get(known), thinking) ?? merged.get(known) ?? thinking,
-      );
-    }
-  }
-  if (fast) {
-    const fastParam = [...byId.keys()].find((id) => id.toLowerCase() === "fast");
+  if (fastState !== undefined) {
+    const fastParam = fastParamForModel(raw);
     if (fastParam) {
-      const values = byId.get(fastParam)?.values?.map((entry) => entry.value) ?? [];
-      const fastValue =
-        values.find((value) => value.toLowerCase() === "true") ??
-        values.find((value) => value.length > 0);
-      if (fastValue !== undefined) merged.set(fastParam, fastValue);
+      const value = fastParamValue(fastParam, fastState);
+      if (value !== undefined) merged.set(fastParam.id, value);
     }
   }
   if (merged.size === 0) return undefined;
@@ -144,53 +297,30 @@ export function resolveCursorModelParams(args: {
 }
 
 /**
- * Validate a thinking-option change for the current model: the id must match a
- * known parameter id of that model (case-insensitive on the parameter id).
- * Returns the stored `{ paramId, value }` pair, where value resolves against
- * the parameter's known values (exact match, then case-insensitive fallback,
- * else the id verbatim). Unknown ids throw so the
- * daemon surfaces an invalid selection instead of silently dropping it.
+ * Validate a thinking-option change for the current model: the id must be a
+ * known *value* of the model's thinking param (effort/reasoning/
+ * reasoning_effort, or the thinking on/off flag). Returns the canonical
+ * stored value. Unknown ids throw so the daemon surfaces an invalid
+ * selection instead of silently dropping it.
  */
 export function resolveThinkingParam(args: {
   thinkingOption: string;
   modelId: string | undefined;
   rawModels: CursorModelListItem[] | undefined;
-}): { paramId: string; value: string } {
-  const raw = args.modelId
-    ? args.rawModels?.find(
-        (item) => item.id === args.modelId || item.aliases?.includes(args.modelId ?? ""),
-      )
-    : undefined;
-  const params = raw?.parameters ?? [];
-  const match = params.find(
-    (parameter) =>
-      parameter.id === args.thinkingOption ||
-      parameter.id.toLowerCase() === args.thinkingOption.toLowerCase(),
-  );
-  if (!match) {
-    const known = params.map((parameter) => parameter.id).join(", ") || "none";
+}): { value: string } {
+  const raw = findRawModel(args.rawModels, args.modelId);
+  const param = thinkingParamForModel(raw);
+  if (!param) {
+    throw new Error(`Model "${args.modelId ?? "?"}" has no thinking options`);
+  }
+  const canonical = canonicalThinkingValue(param, args.thinkingOption);
+  if (canonical === undefined) {
+    const known = (param.values ?? []).map((entry) => entry.value).join(", ") || "none";
     throw new Error(
       `Unknown thinking option "${args.thinkingOption}" for model "${args.modelId ?? "?"}". Known: ${known}`,
     );
   }
-  const values = match.values?.map((entry: { value: string }) => entry.value) ?? [];
-  const value =
-    values.find((entry: string) => entry === args.thinkingOption) ??
-    values.find((entry: string) => entry.toLowerCase() === args.thinkingOption.toLowerCase()) ??
-    args.thinkingOption;
-  return { paramId: match.id, value };
-}
-
-function thinkingIncludesValue(
-  parameter: CursorModelParameter | undefined,
-  thinking: string,
-): string | undefined {
-  const values = parameter?.values?.map((entry: { value: string }) => entry.value) ?? [];
-  if (values.length === 0) return thinking;
-  return (
-    values.find((entry: string) => entry === thinking) ??
-    values.find((entry: string) => entry.toLowerCase() === thinking.toLowerCase())
-  );
+  return { value: canonical };
 }
 
 export function toProviderModels(items: CursorModelListItem[]): ProviderModel[] {
@@ -199,21 +329,17 @@ export function toProviderModels(items: CursorModelListItem[]): ProviderModel[] 
     label: item.displayName || item.id,
     description: item.description,
     aliases: item.aliases,
-    thinkingOptions: (item.parameters ?? []).map((parameter) => ({
-      id: parameter.id,
-      label: parameter.displayName || parameter.id,
-    })),
-    defaultThinkingOptionId: defaultVariantParamId(item),
+    thinkingOptions: thinkingOptionsForRaw(item),
+    defaultThinkingOptionId: defaultThinkingValue(item),
+    ...(fastParamForModel(item)
+      ? {
+          metadata: {
+            ...(item as { metadata?: Record<string, unknown> }).metadata,
+            fast: true,
+          },
+        }
+      : {}),
   }));
-}
-
-/** Thinking default for the catalog: the default variant's first param id. */
-function defaultVariantParamId(item: CursorModelListItem): string | undefined {
-  for (const variant of item.variants ?? []) {
-    if (!variant.isDefault) continue;
-    return variant.params[0]?.id;
-  }
-  return undefined;
 }
 
 export function toProviderError(error: unknown): ProviderError {
@@ -311,32 +437,63 @@ export function applySettings(
 export function publishableConfig(args: {
   model?: string;
   mode?: string;
+  thinkingOption?: string;
   settings: Record<string, unknown>;
   models: ProviderModel[];
+  rawModels?: CursorModelListItem[];
+  thinkingSelections?: Record<string, string>;
 }): ProviderConfigState {
+  const thinkingSelections = args.thinkingSelections ?? {};
+  const thinking = selectedThinkingOption({
+    rawModels: args.rawModels,
+    modelId: args.model,
+    thinkingSelections,
+  });
   return {
     model: args.model,
     mode: args.mode ?? DEFAULT_CURSOR_MODE,
+    ...(thinking !== undefined ? { thinkingOption: thinking } : {}),
     models: args.models,
     modes: [...CURSOR_MODES],
     thinkingOptions: thinkingOptionsForModel(args.models, args.model),
-    settings: [
-      {
-        type: "toggle",
-        id: CURSOR_SETTING_AUTO_REVIEW,
-        label: "Auto-review",
-        description: "Classifier-backed Auto mode for tool calls when the backend supports it",
-        value: args.settings[CURSOR_SETTING_AUTO_REVIEW] === true,
-      },
-      {
-        type: "toggle",
-        id: CURSOR_SETTING_FAST,
-        label: "Fast",
-        description: "Fast mode for models that expose a fast parameter",
-        value: args.settings[CURSOR_SETTING_FAST] === true,
-      },
-    ],
+    settings: sessionSettings(args.settings, args.model, args.rawModels),
   };
+}
+
+/**
+ * Exactly one toggle (auto-review) and at most one select (fast, only when
+ * the current model exposes a `fast` param). A constant two-setting array
+ * renders a second identical gear button, and a fast toggle on a fast-less
+ * model silently does nothing.
+ */
+function sessionSettings(
+  settings: Record<string, unknown>,
+  modelId: string | undefined,
+  rawModels: CursorModelListItem[] | undefined,
+): ProviderConfigState["settings"] {
+  const out: Array<ProviderConfigState["settings"][number]> = [
+    {
+      type: "toggle",
+      id: CURSOR_SETTING_AUTO_REVIEW,
+      label: "Auto-review",
+      description: "Classifier-backed Auto mode for tool calls when the backend supports it",
+      value: settings[CURSOR_SETTING_AUTO_REVIEW] === true,
+    },
+  ];
+  if (fastParamForModel(findRawModel(rawModels, modelId))) {
+    out.push({
+      type: "select",
+      id: CURSOR_SETTING_FAST,
+      label: "Fast",
+      description: "Fast mode for models that expose a fast parameter",
+      value: fastSelectValue(settings[CURSOR_SETTING_FAST]),
+      options: [
+        { label: "Off", value: CURSOR_FAST_OFF },
+        { label: "Fast", value: CURSOR_FAST_ON },
+      ],
+    });
+  }
+  return out;
 }
 
 /** Per-model thinking options: only the selected model's parameter ids. */

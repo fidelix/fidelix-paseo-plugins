@@ -32,16 +32,17 @@ import type {
 import {
   applySettings,
   CURSOR_SETTING_AUTO_REVIEW,
-  CURSOR_SETTING_FAST,
   DEFAULT_CURSOR_MODE,
   DEFAULT_CURSOR_MODEL,
   describeTaskArgs,
   describeTaskResult,
+  findRawModel,
   newId,
   publishableConfig,
   resolveCursorModelParams,
   resolveCursorTools,
   resolveThinkingParam,
+  selectedThinkingOption,
   stepToSDKMessage,
   taskArgsOf,
   toJsonValue,
@@ -305,6 +306,18 @@ function createConnection(
     return found;
   }
 
+  /** Raw catalog id for a model reference (follows aliases); falls back to the reference. */
+  function canonicalKey(
+    rawModels: CursorModelListItem[],
+    modelId: string | undefined,
+  ): string {
+    if (!modelId) return "default";
+    return (
+      rawModels.find((item) => item.id === modelId || item.aliases?.includes(modelId))?.id ??
+      modelId
+    );
+  }
+
   interface StoredAgentInfo {
     agentId: string;
     name?: string;
@@ -509,7 +522,13 @@ function createConnection(
           settings: { ...(input.config.settings ?? {}) },
           models,
           rawModels: raw,
-          thinkingSelections: {},
+          // Seed from the daemon's launch config so a restored draft
+          // (model + thinking + fast feature values) applies from the first
+          // turn, not only after a configure round-trip.
+          thinkingSelections:
+            input.config.thinkingOption !== undefined
+              ? { [canonicalKey(raw, input.config.model)]: input.config.thinkingOption }
+              : {},
           agent: null,
           activeTurnId: null,
           activeRun: null,
@@ -616,7 +635,7 @@ function createConnection(
       modelId: state.model,
       rawModels: state.rawModels,
       thinkingSelections: state.thinkingSelections,
-      fast: state.settings[CURSOR_SETTING_FAST] === true,
+      fast: state.settings["fast"],
     });
     if (resolved) return resolved;
     return { id: modelId };
@@ -692,12 +711,7 @@ function createConnection(
     emit({
       type: "session.config",
       sessionId: state.id,
-      config: publishableConfig({
-        model: state.model,
-        mode: config.mode,
-        settings: state.settings,
-        models: state.models,
-      }),
+      config: publishableConfig(currentConfig(state)),
     });
     emit({
       type: "session.commands",
@@ -713,24 +727,26 @@ function createConnection(
   function applyConfigure(state: SessionState, changes: ProviderConfigChanges): void {
     if (changes.model !== undefined) {
       // Model switches apply on the next prompt; the SDK resolves per-send.
+      // Re-key the thinking dropdown to the new model (stored selection if
+      // valid, else the new model's default) so a stale value from the old
+      // model never leaks into params or selection.
       state.model = changes.model ?? undefined;
     }
     if (changes.thinkingOption !== undefined && changes.thinkingOption !== null) {
-      // Thinking ids map to SDK model params: the id must be a known
-      // parameter id for the current model (resolveThinkingParam throws for
-      // unknown ids). Stored per model so switching models keeps each
-      // model's own selection; send() merges it over the default variant.
-      resolveThinkingParam({
+      // Thinking ids are thinking-param *values* (low/medium/high/…) for the
+      // current model; resolveThinkingParam throws for unknown ids. Stored
+      // per raw model id so switching models keeps each model's own value.
+      const { value } = resolveThinkingParam({
         thinkingOption: changes.thinkingOption,
         modelId: state.model,
         rawModels: state.rawModels,
       });
-      const key = canonicalRawId(state, state.model);
-      state.thinkingSelections[key ?? state.model ?? "default"] = changes.thinkingOption;
+      const key = findRawModel(state.rawModels, state.model)?.id ?? state.model ?? "default";
+      state.thinkingSelections[key] = value;
     }
     if (changes.thinkingOption === null) {
-      const key = canonicalRawId(state, state.model);
-      delete state.thinkingSelections[key ?? state.model ?? "default"];
+      const key = findRawModel(state.rawModels, state.model)?.id ?? state.model ?? "default";
+      delete state.thinkingSelections[key];
     }
     applySettings(state.settings, changes.settings as Record<string, unknown> | undefined);
     if (changes.mode !== undefined) {
@@ -742,23 +758,25 @@ function createConnection(
     emit({
       type: "session.config",
       sessionId: state.id,
-      config: publishableConfig({
-        model: state.model,
-        mode: state.config.mode,
-        settings: state.settings,
-        models: state.models,
-      }),
+      config: publishableConfig(currentConfig(state)),
     });
   }
 
-  /** Raw catalog id for a model reference (follows aliases). */
-  function canonicalRawId(state: SessionState, modelId: string | undefined): string | undefined {
-    if (!modelId) return undefined;
-    return (
-      state.rawModels.find(
-        (item) => item.id === modelId || item.aliases?.includes(modelId),
-      )?.id ?? modelId
-    );
+  /** Emit the current session config: selected model, its thinking value, per-model dropdown, settings. */
+  function currentConfig(state: SessionState): Parameters<typeof publishableConfig>[0] {
+    return {
+      model: state.model,
+      mode: state.config.mode,
+      thinkingOption: selectedThinkingOption({
+        rawModels: state.rawModels,
+        modelId: state.model,
+        thinkingSelections: state.thinkingSelections,
+      }),
+      settings: state.settings,
+      models: state.models,
+      rawModels: state.rawModels,
+      thinkingSelections: state.thinkingSelections,
+    };
   }
 
   async function runPrompt(state: SessionState, prompt: ProviderPrompt): Promise<void> {

@@ -3,9 +3,13 @@
 // No SDK imports, no network.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { CursorSDKMessage, CursorTokenUsage } from "./cursor-sdk-types.ts";
+import type {
+  CursorModelListItem,
+  CursorSDKMessage,
+  CursorTokenUsage,
+} from "./cursor-sdk-types.ts";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
-import { describeTaskArgs, describeTaskResult, publishableConfig, taskArgsOf, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
+import { describeTaskArgs, describeTaskResult, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
 
 const IDS = { itemId: "item:1" };
 
@@ -311,26 +315,92 @@ describe("toUsage", () => {
 });
 
 describe("toProviderModels / toProviderError / publishableConfig", () => {
-  it("maps model list items with thinking options", () => {
-    assert.deepEqual(
-      toProviderModels([
+  function grok(): CursorModelListItem {
+    return {
+      id: "grok-4.6",
+      displayName: "Grok 4.6",
+      parameters: [
         {
-          id: "composer-2.5",
-          displayName: "Composer",
-          parameters: [{ id: "effort", displayName: "Effort", values: [] }],
+          id: "effort",
+          displayName: "Effort",
+          values: [
+            { value: "low", displayName: "Low" },
+            { value: "medium", displayName: "Medium" },
+            { value: "high", displayName: "High" },
+            { value: "xhigh", displayName: "Extra High" },
+          ],
         },
-      ]),
-      [
+        { id: "fast", displayName: "Fast", values: [{ value: "false" }, { value: "true" }] },
+      ],
+      variants: [
         {
-          id: "composer-2.5",
-          label: "Composer",
-          description: undefined,
-          aliases: undefined,
-          thinkingOptions: [{ id: "effort", label: "Effort" }],
-          defaultThinkingOptionId: undefined,
+          params: [
+            { id: "effort", value: "high" },
+            { id: "fast", value: "true" },
+          ],
+          displayName: "Grok 4.6",
+          isDefault: true,
         },
       ],
-    );
+    };
+  }
+
+  function composer(): CursorModelListItem {
+    return {
+      id: "composer-2.5",
+      displayName: "Composer",
+      parameters: [{ id: "fast", displayName: "Fast", values: [{ value: "false" }, { value: "true" }] }],
+      variants: [{ params: [{ id: "fast", value: "true" }], displayName: "Composer", isDefault: true }],
+    };
+  }
+
+  it("maps reasoning values to thinking options with the default marked", () => {
+    assert.deepEqual(toProviderModels([grok()]), [
+      {
+        id: "grok-4.6",
+        label: "Grok 4.6",
+        description: undefined,
+        aliases: undefined,
+        thinkingOptions: [
+          { id: "low", label: "Low" },
+          { id: "medium", label: "Medium" },
+          { id: "high", label: "High", isDefault: true },
+          { id: "xhigh", label: "Extra High" },
+        ],
+        defaultThinkingOptionId: "high",
+        metadata: { fast: true },
+      },
+    ]);
+  });
+
+  it("omits thinking options for fast-only models but keeps the fast marker", () => {
+    assert.deepEqual(toProviderModels([composer()]), [
+      {
+        id: "composer-2.5",
+        label: "Composer",
+        description: undefined,
+        aliases: undefined,
+        thinkingOptions: undefined,
+        defaultThinkingOptionId: undefined,
+        metadata: { fast: true },
+      },
+    ]);
+  });
+
+  it("maps legacy thinking on/off values to On/Off labels", () => {
+    const [model] = toProviderModels([
+      {
+        id: "claude-haiku-4-5",
+        displayName: "Haiku",
+        parameters: [{ id: "thinking", displayName: "Thinking", values: [{ value: "false" }, { value: "true" }] }],
+        variants: [{ params: [{ id: "thinking", value: "true" }], displayName: "Haiku", isDefault: true }],
+      },
+    ]);
+    assert.deepEqual(model?.thinkingOptions, [
+      { id: "false", label: "Off" },
+      { id: "true", label: "On", isDefault: true },
+    ]);
+    assert.equal(model?.defaultThinkingOptionId, "true");
   });
 
   it("falls back to the model id as label", () => {
@@ -345,10 +415,153 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
     assert.deepEqual(toProviderError("plain"), { message: "plain" });
   });
 
-  it("publishes config with the default mode and auto-review toggle", () => {
-    const config = publishableConfig({ settings: {}, models: [] });
+  it("publishes one toggle plus no fast select for fast-less models", () => {
+    const noFast: CursorModelListItem = {
+      id: "gemini-3.8-flash",
+      displayName: "Flash",
+      parameters: [
+        {
+          id: "reasoning_effort",
+          displayName: "Effort",
+          values: [{ value: "low" }, { value: "high" }],
+        },
+      ],
+      variants: [{ params: [{ id: "reasoning_effort", value: "high" }], displayName: "Flash", isDefault: true }],
+    };
+    const config = publishableConfig({ settings: {}, models: toProviderModels([noFast]), rawModels: [noFast] });
     assert.equal(config.mode, "agent");
+    assert.deepEqual(
+      config.settings.map((setting) => setting.id),
+      ["autoReview"],
+    );
+  });
+
+  it("publishes a fast select only for models with a fast param", () => {
+    const models = toProviderModels([grok()]);
+    const config = publishableConfig({
+      model: "grok-4.6",
+      settings: {},
+      models,
+      rawModels: [grok()],
+      thinkingSelections: {},
+    });
+    assert.equal(config.settings.length, 2);
     assert.equal(config.settings[0]?.id, "autoReview");
     assert.equal(config.settings[1]?.id, "fast");
+    assert.equal(config.settings[1]?.type, "select");
+    assert.equal(config.thinkingOption, "high");
+    assert.deepEqual(
+      config.thinkingOptions.map((option) => option.id),
+      ["low", "medium", "high", "xhigh"],
+    );
+  });
+
+  it("re-keys thinking to the new model default on model switch", () => {
+    const raw = [grok(), composer()];
+    const models = toProviderModels(raw);
+    const selections: Record<string, string> = { "grok-4.6": "xhigh" };
+    assert.equal(
+      selectedThinkingOption({ rawModels: raw, modelId: "grok-4.6", thinkingSelections: selections }),
+      "xhigh",
+    );
+    // composer has no thinking param: no stale xhigh leaks through.
+    assert.equal(
+      selectedThinkingOption({ rawModels: raw, modelId: "composer-2.5", thinkingSelections: selections }),
+      undefined,
+    );
+  });
+});
+
+describe("thinking params / fast select wiring", () => {
+  function opus(): CursorModelListItem {
+    return {
+      id: "claude-opus-5-5",
+      displayName: "Opus",
+      parameters: [
+        {
+          id: "context",
+          displayName: "Context",
+          values: [{ value: "300k" }, { value: "1m" }],
+        },
+        {
+          id: "effort",
+          displayName: "Effort",
+          values: [{ value: "low" }, { value: "medium" }, { value: "high" }, { value: "xhigh" }, { value: "max" }],
+        },
+        { id: "fast", displayName: "Fast", values: [{ value: "false" }, { value: "true" }] },
+      ],
+      variants: [
+        {
+          params: [
+            { id: "context", value: "1m" },
+            { id: "effort", value: "medium" },
+            { id: "fast", value: "false" },
+          ],
+          displayName: "Opus",
+          isDefault: true,
+        },
+      ],
+    };
+  }
+
+  it("prefers effort over context/fast, never context", () => {
+    const raw = opus();
+    assert.equal(thinkingParamForModel(raw)?.id, "effort");
+    assert.equal(fastParamForModel(raw)?.id, "fast");
+  });
+
+  it("validates thinking values, not param ids", () => {
+    const raw = [opus()];
+    assert.deepEqual(
+      resolveThinkingParam({ thinkingOption: "xhigh", modelId: "claude-opus-5-5", rawModels: raw }),
+      { value: "xhigh" },
+    );
+    assert.throws(
+      () => resolveThinkingParam({ thinkingOption: "effort", modelId: "claude-opus-5-5", rawModels: raw }),
+      /Unknown thinking option "effort"/,
+    );
+  });
+
+  it("merges default variant + thinking + explicit fast into params", () => {
+    const raw = [opus()];
+    const resolved = resolveCursorModelParams({
+      modelId: "claude-opus-5-5",
+      rawModels: raw,
+      thinkingSelections: { "claude-opus-5-5": "xhigh" },
+      fast: "true",
+    });
+    assert.deepEqual(resolved, {
+      id: "claude-opus-5-5",
+      params: [
+        { id: "context", value: "1m" },
+        { id: "effort", value: "xhigh" },
+        { id: "fast", value: "true" },
+      ],
+    });
+  });
+
+  it("leaves fast on the default variant when the select is unset", () => {
+    const raw = [opus()];
+    const resolved = resolveCursorModelParams({
+      modelId: "claude-opus-5-5",
+      rawModels: raw,
+      thinkingSelections: {},
+      fast: undefined,
+    });
+    assert.deepEqual(resolved, {
+      id: "claude-opus-5-5",
+      params: [
+        { id: "context", value: "1m" },
+        { id: "effort", value: "medium" },
+        { id: "fast", value: "false" },
+      ],
+    });
+  });
+
+  it("accepts legacy boolean fast settings", () => {
+    assert.equal(fastSettingState(true), true);
+    assert.equal(fastSettingState(false), false);
+    assert.equal(fastSelectValue(true), "true");
+    assert.equal(fastSelectValue(undefined), null);
   });
 });
