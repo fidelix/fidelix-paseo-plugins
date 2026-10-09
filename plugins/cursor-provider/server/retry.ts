@@ -78,8 +78,20 @@ function readRetryableFlag(error: unknown): boolean | undefined {
   return undefined;
 }
 
+function readMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error !== null && typeof error === "object") {
+    // run.wait() failures arrive as plain `{ message }` objects, not Error
+    // instances. String(error) on those yields "[object Object]", which is
+    // what the user sees — always prefer a string .message when present.
+    const message = Reflect.get(error, "message");
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return String(error);
+}
+
 export function classifyCursorError(error: unknown): ClassifiedError {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = readMessage(error);
   const raw = readCode(error) ?? (error as CursorSdkErrorShape | null)?.code;
   const code = typeof raw === "string" && raw.length > 0 ? raw : undefined;
   const normalized = code?.toLowerCase();

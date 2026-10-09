@@ -522,7 +522,7 @@ describe("thinking params / fast select wiring", () => {
     );
   });
 
-  it("merges default variant + thinking + explicit fast into params", () => {
+  it("merges thinking + explicit fast into params, never context", () => {
     const raw = [opus()];
     const resolved = resolveCursorModelParams({
       modelId: "claude-opus-5-5",
@@ -533,14 +533,13 @@ describe("thinking params / fast select wiring", () => {
     assert.deepEqual(resolved, {
       id: "claude-opus-5-5",
       params: [
-        { id: "context", value: "1m" },
         { id: "effort", value: "xhigh" },
         { id: "fast", value: "true" },
       ],
     });
   });
 
-  it("leaves fast on the default variant when the select is unset", () => {
+  it("sends a bare model id when thinking and fast are unset", () => {
     const raw = [opus()];
     const resolved = resolveCursorModelParams({
       modelId: "claude-opus-5-5",
@@ -550,11 +549,7 @@ describe("thinking params / fast select wiring", () => {
     });
     assert.deepEqual(resolved, {
       id: "claude-opus-5-5",
-      params: [
-        { id: "context", value: "1m" },
-        { id: "effort", value: "medium" },
-        { id: "fast", value: "false" },
-      ],
+      params: [{ id: "effort", value: "medium" }],
     });
   });
 

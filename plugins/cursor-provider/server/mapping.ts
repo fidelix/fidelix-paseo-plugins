@@ -259,12 +259,14 @@ export function findCursorModel(
 
 /**
  * Resolve the SDK `{ id, params }` selection for a model id against the
- * published catalog. Starts from the catalog entry's default variant params
- * (isDefault), applies the stored per-model thinking value (validated against
- * the thinking param's known values; stale ids fall back to the default),
- * then applies the fast select (explicit on/off only — unset follows the
- * default variant). Returns undefined when the model is unknown or has no
- * params to send.
+ * published catalog. Only the thinking value and the fast select override
+ * the bare model id — `context` (window size) and any other variant-only
+ * params always follow the default variant, because the backend's model
+ * registry rejects explicit values for some params (grok-4.7:
+ * `Invalid parameters for registry model`). Stale stored thinking values
+ * fall back to the default instead of poisoning params. Unset fast follows
+ * the default variant. Returns undefined when the model is unknown or has
+ * no params to send.
  */
 export function resolveCursorModelParams(args: {
   modelId: string | undefined;
@@ -277,23 +279,24 @@ export function resolveCursorModelParams(args: {
   if (!modelId) return undefined;
   const raw = findRawModel(rawModels, modelId);
   if (!raw) return undefined;
-  const merged = defaultVariantParamMap(raw);
+  const params: Array<{ id: string; value: string }> = [];
   const thinkingParam = thinkingParamForModel(raw);
   if (thinkingParam) {
     const stored = thinkingSelections[raw.id] ?? thinkingSelections[modelId];
-    const canonical = stored !== undefined ? canonicalThinkingValue(thinkingParam, stored) : undefined;
-    const value = canonical ?? defaultVariantParamMap(raw).get(thinkingParam.id);
-    if (value !== undefined) merged.set(thinkingParam.id, value);
+    const value =
+      (stored !== undefined ? canonicalThinkingValue(thinkingParam, stored) : undefined) ??
+      defaultVariantParamMap(raw).get(thinkingParam.id);
+    if (value !== undefined) params.push({ id: thinkingParam.id, value });
   }
   if (fastState !== undefined) {
     const fastParam = fastParamForModel(raw);
     if (fastParam) {
       const value = fastParamValue(fastParam, fastState);
-      if (value !== undefined) merged.set(fastParam.id, value);
+      if (value !== undefined) params.push({ id: fastParam.id, value });
     }
   }
-  if (merged.size === 0) return undefined;
-  return { id: modelId, params: [...merged.entries()].map(([id, value]) => ({ id, value })) };
+  if (params.length === 0) return undefined;
+  return { id: modelId, params };
 }
 
 /**
@@ -343,12 +346,27 @@ export function toProviderModels(items: CursorModelListItem[]): ProviderModel[] 
 }
 
 export function toProviderError(error: unknown): ProviderError {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = readErrorMessage(error);
   const code =
     error !== null && typeof error === "object" && "code" in error
       ? String(Reflect.get(error, "code") ?? "")
       : undefined;
   return code ? { message, code } : { message };
+}
+
+/**
+ * run.wait() failures arrive as plain `{ message }` objects, not Error
+ * instances. String() on those yields "[object Object]" — the useless
+ * `[System Error] [object Object]` the user sees — so always prefer a
+ * string .message when present.
+ */
+function readErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error !== null && typeof error === "object") {
+    const message = Reflect.get(error, "message");
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return String(error);
 }
 
 /**

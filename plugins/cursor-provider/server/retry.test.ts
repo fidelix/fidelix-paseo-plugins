@@ -5,6 +5,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
 import { DEFAULT_RETRY_POLICY, classifyCursorError, retryDelayMs, sleep } from "./retry.ts";
+// @ts-expect-error: same `.ts` specifier exemption for the sibling helper under test
+import { toProviderError } from "./mapping.ts";
 
 const RETRYABLE_CODES = [
   "resource_exhausted",
@@ -88,6 +90,15 @@ describe("classifyCursorError", () => {
     assert.equal(classifyCursorError("plain string").retryable, false);
     assert.equal(classifyCursorError(null).retryable, false);
     assert.equal(classifyCursorError(undefined).retryable, false);
+  });
+
+  it("does not retry plain-object run errors without codes", () => {
+    // run.wait() failures arrive as `{ message }` with no code: no retry,
+    // but the message must survive (no "[object Object]").
+    const out = classifyCursorError({ message: "AI Model Not Found" });
+    assert.equal(out.retryable, false);
+    assert.equal(out.message, "AI Model Not Found");
+    assert.deepEqual(toProviderError({ message: "AI Model Not Found" }), { message: "AI Model Not Found" });
   });
 
   it("preserves message and code", () => {
