@@ -103,6 +103,17 @@ interface SessionState {
   closed: boolean;
   /** AbortController for the active turn's retry wait; aborted on interrupt/close. */
   turnAbort: AbortController | null;
+  /**
+   * Background `run.cancel()` from the last interrupted turn. A replacement
+   * prompt waits for it briefly so the SDK never sees two live runs on the
+   * same agent, without letting a hung cancel stall the new turn.
+   */
+  cancelPending: Promise<void> | null;
+  /**
+   * In-flight `Agent.send`. An interrupt can land before the SDK returns the
+   * run object; waiting for this is the only way to learn what to cancel.
+   */
+  sendPending: Promise<CursorRun> | null;
   /** Monotonic turn counter feeding message ids and revert tokens. */
   turnSeq: number;
   /** user_message timeline ids in order, for revert targeting. */
@@ -295,7 +306,8 @@ function createConnection(
   const listeners = new Set<(event: ProviderEvent) => void>();
   const permissions = new Map<string, { sessionId: string; requestId: string }>();
   let closed = false;
-  let pending = Promise.resolve();
+  /** Last catalog failure logged, so a broken key does not spam every refresh. */
+  let lastCatalogError: string | null = null;
 
   function emit(event: ProviderEvent): void {
     if (closed) return;
@@ -306,6 +318,39 @@ function createConnection(
     const found = sessions.get(id);
     if (!found) throw new Error(`Unknown Cursor session: ${id}`);
     return found;
+  }
+
+  /**
+   * Settle the active turn immediately: clear the turn bookkeeping, abort the
+   * retry wait, emit `canceled`, and cancel the SDK run in the background.
+   * The daemon settles its run on the event, so this must never wait for the
+   * SDK cancel (which can hang on a stalled backend) — that wait used to blow
+   * the daemon's 2s interrupt budget and surface as "cancellation was not
+   * acknowledged".
+   */
+  function cancelActiveTurn(state: SessionState, emitCanceled: boolean): void {
+    const turnId = state.activeTurnId;
+    const run = state.activeRun;
+    state.activeTurnId = null;
+    state.activeRun = null;
+    state.turnAbort?.abort();
+    state.turnAbort = null;
+    if (run) {
+      state.cancelPending = run
+        .cancel()
+        .catch(() => undefined)
+        .then(() => undefined);
+    } else if (state.sendPending) {
+      // Interrupted before the SDK returned the run object. Wait for it in the
+      // background, then cancel whatever it produced.
+      state.cancelPending = state.sendPending
+        .then((pendingRun) => pendingRun.cancel())
+        .catch(() => undefined)
+        .then(() => undefined);
+    }
+    if (emitCanceled && turnId) {
+      emit({ type: "session.turn", sessionId: state.id, turnId, state: "canceled" });
+    }
   }
 
   /** Raw catalog id for a model reference (follows aliases); falls back to the reference. */
@@ -494,12 +539,24 @@ function createConnection(
             apiKey ? { apiKey } : {},
           )) as CursorModelListItem[];
           const cached = writeCache(toProviderModels(raw), raw);
+          lastCatalogError = null;
           emit({
             type: "catalog",
             requestId: input.requestId,
             catalog: toCatalog(cached.models),
           });
-        } catch {
+        } catch (error) {
+          // A bad/expired key makes the SDK return one fallback model. Log the
+          // real reason once per distinct failure so "only composer-2.5 shows
+          // up" is diagnosable from daemon.log instead of looking like a
+          // catalog with one entry.
+          const message = toProviderError(error).message;
+          if (message !== lastCatalogError) {
+            lastCatalogError = message;
+            console.error(
+              `cursor-sdk provider: model catalog unavailable (${message}); serving the fallback catalog. Check the API key or sign in from the Cursor settings screen.`,
+            );
+          }
           emit({ type: "catalog", requestId: input.requestId, catalog: fallbackCatalog() });
         }
         return;
@@ -536,6 +593,8 @@ function createConnection(
           activeRun: null,
           closed: false,
           turnAbort: null,
+          cancelPending: null,
+          sendPending: null,
           turnSeq: 0,
           userMessageIds: [],
         };
@@ -549,9 +608,17 @@ function createConnection(
         }
         return;
       }
-      case "session.prompt":
-        await runPrompt(session(input.sessionId), input.prompt);
+      case "session.prompt": {
+        const state = session(input.sessionId);
+        // Accept the turn and return. Awaiting the whole run here serialized
+        // every later message on the connection behind it: interrupts could
+        // never be acknowledged, prompts for other sessions never emitted
+        // `session.prompt_result`, and the daemon timed out with "run did not
+        // start within 60 seconds". `runPrompt` emits the start result
+        // synchronously; its failures are reported through turn/prompt events.
+        void runPrompt(state, input.prompt).catch((error) => failed(input, error));
         return;
+      }
       case "session.configure": {
         const state = session(input.sessionId);
         applyConfigure(state, input.changes);
@@ -559,9 +626,7 @@ function createConnection(
         return;
       }
       case "session.interrupt": {
-        const state = session(input.sessionId);
-        state.turnAbort?.abort();
-        await state.activeRun?.cancel().catch(() => undefined);
+        cancelActiveTurn(session(input.sessionId), true);
         emit({ type: "request.completed", requestId: input.requestId });
         return;
       }
@@ -575,7 +640,7 @@ function createConnection(
         // without interactive approval. Deny interrupts the active run.
         if (input.response.behavior === "deny") {
           const state = sessions.get(input.sessionId);
-          await state?.activeRun?.cancel().catch(() => undefined);
+          if (state) cancelActiveTurn(state, true);
         }
         emit({
           type: "session.permission_resolved",
@@ -596,10 +661,11 @@ function createConnection(
         const state = sessions.get(input.sessionId);
         if (state) {
           state.closed = true;
-          state.turnAbort?.abort();
-          await state.activeRun?.cancel().catch(() => undefined);
-          await closeAgent(state).catch(() => undefined);
           sessions.delete(input.sessionId);
+          cancelActiveTurn(state, false);
+          // Closing the SDK agent can wait on the runtime; the daemon only
+          // needs the session gone, so finish teardown in the background.
+          void closeAgent(state).catch(() => undefined);
         }
         emit({ type: "session.closed", sessionId: input.sessionId });
         return;
@@ -831,8 +897,9 @@ function createConnection(
     }
     const { text, images } = promptText(prompt);
     const turnId = newId("turn");
+    const turnAbort = new AbortController();
     state.activeTurnId = turnId;
-    state.turnAbort = new AbortController();
+    state.turnAbort = turnAbort;
     state.turnSeq += 1;
     const messageId = `user:${state.turnSeq}`;
     emit({
@@ -855,7 +922,10 @@ function createConnection(
     });
     state.userMessageIds.push(messageId);
     try {
-      const result = await sendWithRetry(state, text, images, turnId);
+      const result = await sendWithRetry(state, text, images, turnId, turnAbort.signal);
+      // An interrupt already settled this turn (cleared activeTurnId and
+      // emitted `canceled`); never overwrite a newer turn's state.
+      if (state.activeTurnId !== turnId) return;
       state.activeTurnId = null;
       state.activeRun = null;
       state.turnAbort = null;
@@ -875,6 +945,7 @@ function createConnection(
       }
       emit({ type: "session.turn", sessionId: state.id, turnId, state: "completed" });
     } catch (error) {
+      if (state.activeTurnId !== turnId) return;
       state.activeTurnId = null;
       state.activeRun = null;
       state.turnAbort = null;
@@ -888,27 +959,61 @@ function createConnection(
     }
   }
 
+  /**
+   * A replacement turn must not race the SDK cancel of the turn it replaces.
+   * Wait for it, but never longer than the daemon's interrupt budget: a hung
+   * cancel should cost the new turn a short delay, not a dead agent.
+   */
+  async function waitForPriorCancel(state: SessionState): Promise<void> {
+    const cancel = state.cancelPending;
+    if (!cancel) return;
+    // A live `send` can take a few seconds; waiting for it is better than
+    // racing the SDK's "agent already has active run" rejection. A hung send
+    // still gets a hard cap so a new turn is not blocked forever.
+    await Promise.race([cancel, sleep(30_000)]);
+    if (state.cancelPending === cancel) state.cancelPending = null;
+  }
+
   async function sendWithRetry(
     state: SessionState,
     text: string,
     images: Array<{ data: string; mimeType: string }>,
     turnId: string,
+    signal: AbortSignal,
   ): Promise<
     { status: "finished" | "cancelled" } | { status: "error"; error: { message: string; code?: string } }
   > {
     let attempt = 0;
     for (;;) {
+      if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
       attempt += 1;
       try {
-        const run = (await state.agent!.send(images.length > 0 ? { text, images } : text, {
+        await waitForPriorCancel(state);
+        if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
+        const sending = state.agent!.send(images.length > 0 ? { text, images } : text, {
           model: resolveModelSelection(state),
           mode: toAgentMode(state.config.mode),
           mcpServers: toMcpServers(state.config),
-        })) as CursorRun;
+        }) as Promise<CursorRun>;
+        state.sendPending = sending;
+        let run: CursorRun;
+        try {
+          run = await sending;
+        } finally {
+          if (state.sendPending === sending) state.sendPending = null;
+        }
+        // Interrupted while `send` was in flight: the turn is already settled
+        // for the daemon, so cancel this run without adopting it.
+        if (state.activeTurnId !== turnId || signal.aborted || state.closed) {
+          void run.cancel().catch(() => undefined);
+          return { status: "cancelled" };
+        }
         state.activeRun = run;
         await drainRun(state, run, turnId);
         const result = await run.wait();
+        if (state.activeTurnId !== turnId) return { status: "cancelled" };
         emitTurnUsage(state, turnId, toUsageWithCost(result.usage, await readTurnCostUsd(state)));
+        if (state.activeTurnId !== turnId) return { status: "cancelled" };
         if (result.status === "finished") return { status: "finished" };
         if (result.status === "cancelled") return { status: "cancelled" };
         const classified = classifyCursorError(
@@ -917,26 +1022,26 @@ function createConnection(
             : result.error,
         );
         if (classified.retryable && attempt < retry.maxAttempts) {
+          state.activeRun = null;
           emitRetryNotice(state, turnId, attempt, classified.message);
-          const signal = state.turnAbort?.signal;
           try {
             await sleep(retryDelayMs(attempt, retry), signal);
           } catch {
-            if (signal?.aborted) return { status: "cancelled" };
+            if (signal.aborted) return { status: "cancelled" };
             throw new Error(classified.message);
           }
           continue;
         }
         return { status: "error", error: { message: classified.message, code: classified.code } };
       } catch (error) {
+        if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
         const classified = classifyCursorError(error);
         if (classified.retryable && attempt < retry.maxAttempts) {
           emitRetryNotice(state, turnId, attempt, classified.message);
-          const signal = state.turnAbort?.signal;
           try {
             await sleep(retryDelayMs(attempt, retry), signal);
           } catch {
-            if (signal?.aborted) return { status: "cancelled" };
+            if (signal.aborted) return { status: "cancelled" };
             throw error;
           }
           continue;
@@ -1004,7 +1109,7 @@ function createConnection(
     // Provider-owned child sessions keyed by SDK call id for this turn.
     const turnChildren = new Map<string, string>();
     for await (const event of run.stream()) {
-      if (state.closed) break;
+      if (state.closed || state.activeTurnId !== turnId) break;
       if (event.type === "assistant") {
         const text = event.message.content
           .filter((block) => block.type === "text")
@@ -1357,11 +1462,8 @@ function createConnection(
         emit({ type: "session.closed", sessionId: childId });
       }
     }
-    await state.activeRun?.cancel().catch(() => undefined);
-    state.turnAbort?.abort();
-    state.activeRun = null;
-    state.activeTurnId = null;
-    state.turnAbort = null;
+    cancelActiveTurn(state, false);
+    await waitForPriorCancel(state);
     await closeAgent(state);
     // Re-create the native agent so the next prompt resumes cleanly; the
     // daemon replays prefix history from its own timeline store.
@@ -1419,8 +1521,7 @@ function createConnection(
     for (const [sessionId, state] of [...sessions.entries()]) {
       if (state.agent?.agentId !== agentId) continue;
       state.closed = true;
-      state.turnAbort?.abort();
-      await state.activeRun?.cancel().catch(() => undefined);
+      cancelActiveTurn(state, false);
       await closeAgent(state).catch(() => undefined);
       sessions.delete(sessionId);
       emit({ type: "session.closed", sessionId });
@@ -1439,13 +1540,13 @@ function createConnection(
     capabilities: [...CAPABILITIES],
     async send(input) {
       if (closed) throw new Error("Cursor connection is closed");
-      pending = pending
-        .then(async () => {
-          if (!closed) await dispatch(input);
-          return undefined;
-        })
-        .catch((error) => failed(input, error));
-      await pending;
+      try {
+        await dispatch(input);
+      } catch (error) {
+        // Each input reports its own failure; one rejected operation must not
+        // poison the operations that follow it.
+        failed(input, error);
+      }
     },
     onEvent(listener) {
       listeners.add(listener);
@@ -1453,22 +1554,21 @@ function createConnection(
     },
     async close() {
       if (closed) return;
-      // Abort retry waits so the pending drain below is not stalled, and
-      // close provider-owned children while listeners still receive events
-      // (emit() is suppressed once `closed` is set).
-      for (const state of sessions.values()) state.turnAbort?.abort();
+      // Abort in-flight turns and close provider-owned children while
+      // listeners still receive events (emit() is suppressed once `closed`
+      // is set). Cancels run in the background: teardown must not wait on a
+      // stalled backend.
+      for (const state of sessions.values()) {
+        state.closed = true;
+        cancelActiveTurn(state, false);
+      }
       for (const childId of [...children.keys()]) {
         children.delete(childId);
         emit({ type: "session.closed", sessionId: childId });
       }
       closed = true;
-      await pending.catch(() => undefined);
       await Promise.all(
-        [...sessions.values()].map(async (state) => {
-          state.closed = true;
-          await state.activeRun?.cancel().catch(() => undefined);
-          await closeAgent(state).catch(() => undefined);
-        }),
+        [...sessions.values()].map((state) => closeAgent(state).catch(() => undefined)),
       );
       sessions.clear();
       children.clear();
