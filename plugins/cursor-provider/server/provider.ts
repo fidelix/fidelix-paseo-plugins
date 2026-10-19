@@ -31,12 +31,14 @@ import type {
 } from "@getpaseo/plugin/server/provider";
 import {
   applySettings,
+  CURSOR_SETTING_AUTO_ACCEPT,
   CURSOR_SETTING_AUTO_REVIEW,
   DEFAULT_CURSOR_MODE,
   DEFAULT_CURSOR_MODEL,
   describeTaskArgs,
   describeTaskResult,
   findRawModel,
+  isAutoAcceptEnabled,
   newId,
   publishableConfig,
   resolveCursorModelParams,
@@ -685,7 +687,7 @@ function createConnection(
             local: {
               cwd: config.cwd,
               store,
-              autoReview: state.settings[CURSOR_SETTING_AUTO_REVIEW] === true,
+              autoReview: isAutoAcceptEnabled(state.settings),
             },
             ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
             mcpServers: toMcpServers(config),
@@ -749,6 +751,17 @@ function createConnection(
       delete state.thinkingSelections[key];
     }
     applySettings(state.settings, changes.settings as Record<string, unknown> | undefined);
+    // Pre-rename sessions stored the toggle under `autoReview`; migrate the
+    // value forward so one stored key never splits the toggle state.
+    if (
+      CURSOR_SETTING_AUTO_ACCEPT in state.settings &&
+      !(CURSOR_SETTING_AUTO_REVIEW in (changes.settings as Record<string, unknown> | undefined ?? {}))
+    ) {
+      delete state.settings[CURSOR_SETTING_AUTO_REVIEW];
+    } else if (CURSOR_SETTING_AUTO_REVIEW in state.settings) {
+      state.settings[CURSOR_SETTING_AUTO_ACCEPT] = state.settings[CURSOR_SETTING_AUTO_REVIEW];
+      delete state.settings[CURSOR_SETTING_AUTO_REVIEW];
+    }
     if (changes.mode !== undefined) {
       state.config = {
         ...state.config,
@@ -1365,7 +1378,7 @@ function createConnection(
       local: {
         cwd: state.config.cwd,
         store,
-        autoReview: state.settings[CURSOR_SETTING_AUTO_REVIEW] === true,
+        autoReview: isAutoAcceptEnabled(state.settings),
       },
       ...(state.config.systemPrompt ? { systemPrompt: state.config.systemPrompt } : {}),
       mcpServers: toMcpServers(state.config),

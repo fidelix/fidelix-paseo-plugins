@@ -432,7 +432,7 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
     assert.equal(config.mode, "agent");
     assert.deepEqual(
       config.settings.map((setting) => setting.id),
-      ["autoReview"],
+      ["auto_accept"],
     );
   });
 
@@ -446,7 +446,9 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
       thinkingSelections: {},
     });
     assert.equal(config.settings.length, 2);
-    assert.equal(config.settings[0]?.id, "autoReview");
+    assert.equal(config.settings[0]?.id, "auto_accept");
+    assert.equal(config.settings[0]?.type, "toggle");
+    assert.equal(config.settings[0]?.label, "Auto Accept");
     assert.equal(config.settings[1]?.id, "fast");
     assert.equal(config.settings[1]?.type, "select");
     assert.equal(config.thinkingOption, "high");
@@ -454,6 +456,19 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
       config.thinkingOptions.map((option) => option.id),
       ["low", "medium", "high", "xhigh"],
     );
+  });
+
+  it("reads the legacy autoReview key until the first write migrates it", () => {
+    const models = toProviderModels([grok()]);
+    const legacy = publishableConfig({
+      model: "grok-4.6",
+      settings: { autoReview: true },
+      models,
+      rawModels: [grok()],
+      thinkingSelections: {},
+    });
+    assert.equal(legacy.settings[0]?.type, "toggle");
+    assert.equal((legacy.settings[0] as { value: boolean }).value, true);
   });
 
   it("re-keys thinking to the new model default on model switch", () => {

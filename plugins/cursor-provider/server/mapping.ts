@@ -77,7 +77,19 @@ export function isAskLikeMode(mode: string | undefined): boolean {
   return mode.toLowerCase().includes("ask");
 }
 
-/** Settings rendered in the composer. autoReview maps to Cursor's classifier-backed Auto mode. */
+/**
+ * Auto-accept toggle. The SDK headless runtime executes tool calls without
+ * interactive approval — deny only cancels the active run and `question`-type
+ * input requests surface as `cursor-input` prompts. The id matches the
+ * OpenCode convention (`auto_accept`, shield-check icon) so the composer
+ * renders the familiar green shield instead of a generic gear, and its
+ * tooltip/highlight behavior matches other providers. Maps to the SDK
+ * `autoReview` create flag (classifier-backed Auto mode when the backend
+ * has the classifier feature enabled); stored under the `autoReview` key so
+ * existing sessions keep their value across the rename.
+ */
+export const CURSOR_SETTING_AUTO_ACCEPT = "auto_accept";
+/** Legacy storage key for the auto-accept toggle (pre-rename). */
 export const CURSOR_SETTING_AUTO_REVIEW = "autoReview";
 /**
  * Fast mode for models that expose a `fast` parameter. Rendered as a select
@@ -479,7 +491,7 @@ export function publishableConfig(args: {
 }
 
 /**
- * Exactly one toggle (auto-review) and at most one select (fast, only when
+ * Exactly one toggle (auto-accept) and at most one select (fast, only when
  * the current model exposes a `fast` param). A constant two-setting array
  * renders a second identical gear button, and a fast toggle on a fast-less
  * model silently does nothing.
@@ -492,10 +504,10 @@ function sessionSettings(
   const out: Array<ProviderConfigState["settings"][number]> = [
     {
       type: "toggle",
-      id: CURSOR_SETTING_AUTO_REVIEW,
-      label: "Auto-review",
-      description: "Classifier-backed Auto mode for tool calls when the backend supports it",
-      value: settings[CURSOR_SETTING_AUTO_REVIEW] === true,
+      id: CURSOR_SETTING_AUTO_ACCEPT,
+      label: "Auto Accept",
+      description: "Automatically approves Cursor tool calls without asking.",
+      value: isAutoAcceptEnabled(settings),
     },
   ];
   if (fastParamForModel(findRawModel(rawModels, modelId))) {
@@ -512,6 +524,16 @@ function sessionSettings(
     });
   }
   return out;
+}
+
+/**
+ * Auto-accept state with legacy fallback: pre-rename sessions stored the
+ * toggle under `autoReview`. New writes always use `auto_accept`.
+ */
+export function isAutoAcceptEnabled(settings: Record<string, unknown>): boolean {
+  if (settings[CURSOR_SETTING_AUTO_ACCEPT] === true) return true;
+  if (settings[CURSOR_SETTING_AUTO_ACCEPT] === false) return false;
+  return settings[CURSOR_SETTING_AUTO_REVIEW] === true;
 }
 
 /** Per-model thinking options: only the selected model's parameter ids. */

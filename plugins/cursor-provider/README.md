@@ -97,6 +97,11 @@ Override the root with `CURSOR_SDK_STATE_ROOT` (per-agent env or daemon env).
 - **Local runs auto-approve tools.** The SDK headless runtime executes tool calls
   without interactive approval. `session.permission` `deny` only cancels the active
   run; `question`-type input requests are surfaced as a `cursor-input` prompt.
+  The composer's **Auto Accept** toggle (`auto_accept`, same id/icon as OpenCode)
+  maps to the SDK `autoReview` create flag: classifier-backed Auto mode when the
+  backend has the classifier feature enabled, full-allow headless execution
+  otherwise. Pre-rename sessions stored the toggle under `autoReview`; the first
+  configure migrates the value forward.
 - **Reasoning effort is a value dropdown, fast is a select.** Thinking options
   are the model's effort-param *values* (e.g. `low`…`max`), never parameter
   ids (`effort`, `context`) or other models' values — switching models re-keys
