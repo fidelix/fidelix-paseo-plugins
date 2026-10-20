@@ -40,24 +40,16 @@ export interface CursorSdkSqliteModule {
 
 /**
  * Structural subset of the SDK's `LocalAgentStore` (store/local-agent-store.d.ts)
- * used by local-store.ts for legacy import and orphaned-run recovery.
+ * used by local-store.ts for orphaned-run recovery.
  */
 export interface CursorLocalAgentStore {
   agents: {
     get(input: { agentId: string }): Promise<CursorLocalAgentDocument | null>;
-    create(input: { agent: CursorLocalAgentDocument }): Promise<unknown>;
     update(input: { agent: CursorLocalAgentDocument }): Promise<unknown>;
-    delete(input: { filter: { agentIds?: string[] } }): Promise<void>;
   };
   runs: {
     get(input: { agentId: string; runId: string }): Promise<CursorLocalAgentRunDocument | null>;
-    create(input: { run: CursorLocalAgentRunDocument }): Promise<unknown>;
     update(input: { run: CursorLocalAgentRunDocument }): Promise<unknown>;
-    delete(input: { filter: { agentIds?: string[] } }): Promise<void>;
-  };
-  checkpoints: {
-    create(input: { agentId: string; blobId: string; data: Uint8Array }): Promise<void>;
-    delete(input: { filter: { agentIds?: string[] } }): Promise<void>;
   };
   dispose?(): Promise<void>;
 }

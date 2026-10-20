@@ -53,14 +53,11 @@ Sessions persist in the SDK's SQLite store (`@cursor/sdk/sqlite`, backed by
 `~/.cursor/sdk/paseo-plugin/sqlite/<sha256(cwd)>` (`server/local-store.ts`).
 Override the base with `CURSOR_SDK_STATE_ROOT` (per-agent env or daemon env).
 
-Older versions used the SDK's `JsonlLocalAgentStore`, which re-reads, re-parses
-and rewrites a whole NDJSON file on every operation. With every agent sharing
-one store, each checkpoint write cost about 1 GB of transient heap, and the
-plugin process ran out of memory after a few minutes to a few hours. Agents
-from that store (`agents.ndjson`, `runs.ndjson`, `checkpoints.ndjson` in
-`~/.cursor/sdk/paseo-plugin`) still list and resume: the first resume streams
-that agent's rows into the SQLite store. The legacy files are never modified;
-delete them once every agent you care about has been resumed once.
+Don't switch to the SDK's `JsonlLocalAgentStore`. It re-reads, re-parses and
+rewrites a whole NDJSON file on every operation; with every agent sharing one
+store, each checkpoint write cost about 1 GB of transient heap, and the plugin
+process ran out of memory within minutes to hours. Versions before a5c3ffa used
+it; agents from that store are not read anymore.
 
 A run the store still marks active after the plugin process died (crash,
 reload) is cancelled on the next resume, so the agent does not fail with

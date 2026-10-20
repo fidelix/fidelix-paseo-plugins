@@ -18,13 +18,7 @@ export type CursorPluginSettings = PluginSettings<(typeof cursorSettings)["schem
 import { z } from "zod";
 import { loadCursorSdk } from "./cursor-sdk-loader.js";
 import type { CursorLocalAgentStore } from "./cursor-sdk-loader.js";
-import {
-  importLegacyAgent,
-  listLegacyAgents,
-  openLocalStore,
-  settleOrphanedRun,
-  sqliteStateRoot,
-} from "./local-store.js";
+import { openLocalStore, settleOrphanedRun, sqliteStateRoot } from "./local-store.js";
 import type {
   CursorAgent,
   CursorAgentUsage,
@@ -386,7 +380,7 @@ function createConnection(
   /**
    * Sessions list: live connections first, then persisted local agents from
    * Agent.list merged in. Live sessions win on persistence agentId so a
-   * resumed runtime is never duplicated by its own JSONL record.
+   * resumed runtime is never duplicated by its own stored record.
    *
    * Agent.list is a key-only store read (no inference). Failures fall back
    * to live-only rather than failing the request: the daemon still gets a
@@ -433,7 +427,7 @@ function createConnection(
       // import dialog sends request.cwd), so the common case is a single
       // exact-cwd query. Without input.cwd, fall back to live-known cwds plus
       // the process cwd: an unfiltered Agent.list call only returns
-      // store-wide records when the backend supports it, and the JSONL store
+      // store-wide records when the backend supports it, and the local store
       // requires an exact cwd match (it returns none otherwise).
       const cwds = input.cwd
         ? [input.cwd]
@@ -449,26 +443,13 @@ function createConnection(
       };
       const listed = (
         await Promise.all(
-          cwds.map(async (cwd) => {
-            const config = { env: {}, cwd };
-            const stored = await openStore(config)
+          cwds.map((cwd) =>
+            openStore({ env: {}, cwd })
               .then((store) => listable.list({ runtime: "local", cwd, store }))
-              .catch(() => ({ items: [] as StoredAgentInfo[] }));
-            // Agents not yet imported from the legacy JSONL store stay
-            // listed; opening one imports it (see openSession).
-            const legacy = await listLegacyAgents(storeRoot(config), cwd);
-            return [
-              ...(stored.items ?? []),
-              ...legacy.map((agent): StoredAgentInfo => ({
-                agentId: agent.agentId,
-                cwd: agent.cwd,
-                ...(typeof agent["name"] === "string" ? { name: agent["name"] } : {}),
-                lastModified: agent.updatedAt,
-              })),
-            ];
-          }),
+              .catch(() => ({ items: [] as StoredAgentInfo[] })),
+          ),
         )
-      ).flat();
+      ).flatMap((result) => result.items ?? []);
       const stored = [...listed].sort(
         (a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0),
       );
@@ -753,7 +734,7 @@ function createConnection(
     const persistedAgentId = persistence
       ? persistenceSchema.parse(persistence).data.agentId
       : undefined;
-    if (persistedAgentId) await prepareResume(store, config, persistedAgentId);
+    if (persistedAgentId) await settleOrphan(store, persistedAgentId);
     const tools = sessionTools(state);
     const agent = (
       persistedAgentId
@@ -810,22 +791,12 @@ function createConnection(
   }
 
   /**
-   * Before `Agent.resume`: import the agent from the legacy JSONL store if it
-   * predates the SQLite store, then settle a run the store still marks active
-   * although no run for the agent is live here. That run belonged to a plugin
-   * process that crashed or reloaded; left alone, every send fails with
+   * Before `Agent.resume`: settle a run the store still marks active although
+   * no run for the agent is live here. That run belonged to a plugin process
+   * that crashed or reloaded; left alone, every send fails with
    * "Agent … already has active run".
    */
-  async function prepareResume(
-    store: CursorLocalAgentStore,
-    config: ProviderSessionConfig,
-    agentId: string,
-  ): Promise<void> {
-    const root = storeRoot(config);
-    const imported = await importLegacyAgent(store, sqliteStateRoot(root, config.cwd), root, agentId);
-    if (imported === "imported") {
-      console.error(`cursor-sdk provider: imported ${agentId} from the legacy JSONL store`);
-    }
+  async function settleOrphan(store: CursorLocalAgentStore, agentId: string): Promise<void> {
     if (hasLiveRun(agentId)) return;
     const settled = await settleOrphanedRun(store, agentId);
     if (settled) {
@@ -1487,7 +1458,7 @@ function createConnection(
    * Revert truncates the daemon-visible timeline to the referenced user
    * message by reopening the native agent around the surviving prefix.
    * The SDK has no rewind API; conversation history is append-only in the
-   * JSONL store. So: resolve the token to a message count, replay the
+   * local store. So: resolve the token to a message count, replay the
    * surviving prefix as a fresh native agent via follow-up sends is wrong
    * (it would re-execute), therefore the honest implementation is to close
    * the live runtime and resume a fresh agent, then replay only the prefix
@@ -1559,7 +1530,7 @@ function createConnection(
   /**
    * Archive closes the live runtime for every session persisted under the
    * given native agent id and drops provider-owned children. The durable
-   * JSONL record stays resumable via Agent.resume on unarchive/restore.
+   * stored record stays resumable via Agent.resume on unarchive/restore.
    */
   async function archiveSession(persistence: ProviderPersistence): Promise<void> {
     const parsed = persistenceSchema.safeParse(persistence);
@@ -1586,7 +1557,7 @@ function createConnection(
   async function unarchiveSession(persistence: ProviderPersistence): Promise<void> {
     const parsed = persistenceSchema.safeParse(persistence);
     if (!parsed.success) throw new Error("Cursor unarchive persistence is malformed");
-    // No-op by design: local JSONL records are never deleted, so the next
+    // No-op by design: local store records are never deleted, so the next
     // session.open with this persistence resumes via Agent.resume.
   }
 
@@ -1668,7 +1639,7 @@ function commandPromptText(input: { name: string; arguments: string }): string |
 /**
  * Archive/unarchive operate on the provider's own session records, not the
  * daemon's agent record (which the daemon already handles). Local SDK
- * sessions live in the JSONL store; the SDK exposes archive/unarchive as
+ * sessions live in the local SQLite store; the SDK exposes archive/unarchive as
  * cloud-only statics, so for local agents archive closes the live runtime
  * (sessions map entry + SDK handle) and persists the native agent id for
  * later restore. Unarchive is a no-op validation: the durable record is
