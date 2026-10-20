@@ -9,7 +9,7 @@ import type {
   CursorTokenUsage,
 } from "./cursor-sdk-types.ts";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
-import { describeTaskArgs, describeTaskResult, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
+import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
 
 const IDS = { itemId: "item:1" };
 
@@ -573,5 +573,46 @@ describe("thinking params / fast select wiring", () => {
     assert.equal(fastSettingState(false), false);
     assert.equal(fastSelectValue(true), "true");
     assert.equal(fastSelectValue(undefined), null);
+  });
+});
+
+describe("taskUpdateToolCall", () => {
+  it("maps a subagent's started and completed shell call to tool_call messages", () => {
+    const started = taskUpdateToolCall({
+      type: "tool-call-started",
+      callId: "nested-1",
+      toolCall: { type: "shell", args: { command: "ls" } },
+    });
+    assert.deepEqual(started, {
+      type: "tool_call",
+      agent_id: "",
+      run_id: "",
+      call_id: "nested-1",
+      name: "shell",
+      status: "running",
+      args: { command: "ls" },
+    });
+    const item = toTimelineItem(started!, IDS);
+    assert.equal(item?.type, "tool_call");
+    const done = taskUpdateToolCall({
+      type: "tool-call-completed",
+      callId: "nested-1",
+      toolCall: { type: "shell", args: { command: "ls" }, result: { stdout: "a", stderr: "", exitCode: 0 } },
+    });
+    assert.equal(done?.status, "completed");
+    assert.deepEqual(done?.result, { stdout: "a", stderr: "", exitCode: 0 });
+  });
+
+  it("honors an explicit error status", () => {
+    assert.equal(
+      taskUpdateToolCall({ type: "tool-call-completed", callId: "c", status: "error", toolCall: { type: "read" } })?.status,
+      "error",
+    );
+  });
+
+  it("ignores text updates and unresolved tools", () => {
+    assert.equal(taskUpdateToolCall({ type: "text-delta", text: "hi" }), null);
+    assert.equal(taskUpdateToolCall({ type: "partial-tool-call", callId: "c", toolCall: null }), null);
+    assert.equal(taskUpdateToolCall({ type: "tool-call-started", callId: "", toolCall: { type: "ls" } }), null);
   });
 });

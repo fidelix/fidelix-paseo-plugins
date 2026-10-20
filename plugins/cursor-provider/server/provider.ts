@@ -22,9 +22,11 @@ import { openLocalStore, settleOrphanedRun, sqliteStateRoot } from "./local-stor
 import type {
   CursorAgent,
   CursorAgentUsage,
+  CursorInteractionUpdate,
   CursorModelListItem,
   CursorRun,
   CursorSDKMessage,
+  CursorTaskUpdate,
 } from "./cursor-sdk-types.js";
 import type {
   ProviderCommand,
@@ -49,6 +51,7 @@ import {
   selectedThinkingOption,
   stepToSDKMessage,
   taskArgsOf,
+  taskUpdateToolCall,
   toJsonValue,
   toProviderError,
   toProviderModels,
@@ -120,6 +123,10 @@ interface SessionState {
   turnSeq: number;
   /** user_message timeline ids in order, for revert targeting. */
   userMessageIds: string[];
+  /** Child session per SDK `task` call id in the active turn. */
+  taskChildren: Map<string, string>;
+  /** Subagent updates that arrived before their `task` tool call opened the child. */
+  pendingTaskUpdates: Map<string, CursorTaskUpdate[]>;
 }
 
 interface ChildState {
@@ -130,7 +137,16 @@ interface ChildState {
   subAgentType: string | null;
   status: "running" | "completed" | "failed";
   items: number;
+  /** Streaming assistant text / reasoning segment; reset when a tool call starts. */
+  text: { id: string; value: string } | null;
+  reasoning: { id: string; value: string } | null;
+  /** Timeline item id per nested tool call id. */
+  tools: Map<string, string>;
 }
+
+/** Bounds on subagent updates buffered before the child session exists. */
+const MAX_PENDING_TASK_CALLS = 16;
+const MAX_PENDING_TASK_UPDATES = 256;
 
 interface ProviderOptions {
   retry?: Partial<RetryPolicy>;
@@ -593,6 +609,8 @@ function createConnection(
           sendPending: null,
           turnSeq: 0,
           userMessageIds: [],
+          taskChildren: new Map(),
+          pendingTaskUpdates: new Map(),
         };
         sessions.set(input.sessionId, state);
         try {
@@ -1021,6 +1039,7 @@ function createConnection(
           model: resolveModelSelection(state),
           mode: toAgentMode(state.config.mode),
           mcpServers: toMcpServers(state.config),
+          onDelta: ({ update }) => acceptDelta(state, turnId, update),
         }) as Promise<CursorRun>;
         state.sendPending = sending;
         let run: CursorRun;
@@ -1133,8 +1152,6 @@ function createConnection(
     let assistantText = "";
     let assistantId: string | null = null;
     const toolItems = new Map<string, string>();
-    // Provider-owned child sessions keyed by SDK call id for this turn.
-    const turnChildren = new Map<string, string>();
     for await (const event of run.stream()) {
       if (state.closed || state.activeTurnId !== turnId) break;
       if (event.type === "assistant") {
@@ -1183,16 +1200,80 @@ function createConnection(
       });
       if (event.type === "tool_call" && item) {
         toolItems.set(event.call_id, item.id);
-        trackTaskToolCall(state, turnChildren, event, item);
+        trackTaskToolCall(state, event, item);
       }
       if (item) {
         emit({ type: "timeline.item", sessionId: state.id, item });
       }
     }
     // Any child still marked running when the stream ends finished with the turn.
-    for (const childId of turnChildren.values()) {
+    for (const childId of state.taskChildren.values()) {
       finishChild(childId, "completed");
     }
+    state.taskChildren.clear();
+    state.pendingTaskUpdates.clear();
+  }
+
+  /**
+   * `send` onDelta: the SDK streams a running subagent's text, reasoning and
+   * tool calls only here (run.stream() carries just the parent's `task` card).
+   * Runs inline on the SDK's delta path, so it must stay synchronous and cheap.
+   */
+  function acceptDelta(state: SessionState, turnId: string, update: CursorInteractionUpdate): void {
+    if (update.type !== "tool-call-delta" || state.closed || state.activeTurnId !== turnId) return;
+    const { callId, taskUpdate } = update as Extract<CursorInteractionUpdate, { type: "tool-call-delta" }>;
+    const childId = state.taskChildren.get(callId);
+    if (childId) {
+      applyTaskUpdate(childId, taskUpdate);
+      return;
+    }
+    let pending = state.pendingTaskUpdates.get(callId);
+    if (!pending) {
+      if (state.pendingTaskUpdates.size >= MAX_PENDING_TASK_CALLS) return;
+      pending = [];
+      state.pendingTaskUpdates.set(callId, pending);
+    }
+    if (pending.length < MAX_PENDING_TASK_UPDATES) pending.push(taskUpdate);
+  }
+
+  function applyTaskUpdate(childId: string, update: CursorTaskUpdate): void {
+    const child = children.get(childId);
+    if (!child || child.status !== "running") return;
+    if (update.type === "text-delta") {
+      child.reasoning = null;
+      child.text ??= { id: newId("child-text"), value: "" };
+      child.text.value += update.text;
+      emit({
+        type: "timeline.item",
+        sessionId: childId,
+        item: { type: "assistant_message", id: child.text.id, messageId: child.text.id, text: child.text.value },
+      });
+      return;
+    }
+    if (update.type === "thinking-delta") {
+      child.reasoning ??= { id: newId("child-reasoning"), value: "" };
+      child.reasoning.value += update.text;
+      emit({
+        type: "timeline.item",
+        sessionId: childId,
+        item: { type: "reasoning", id: child.reasoning.id, text: child.reasoning.value },
+      });
+      return;
+    }
+    if (update.type === "thinking-completed") {
+      child.reasoning = null;
+      return;
+    }
+    const call = taskUpdateToolCall(update);
+    if (!call) return;
+    child.text = null;
+    child.reasoning = null;
+    const itemId = child.tools.get(call.call_id) ?? newId("child-tool");
+    const item = toTimelineItem(call, { itemId });
+    if (!item) return;
+    if (call.status === "running") child.tools.set(call.call_id, itemId);
+    else child.tools.delete(call.call_id);
+    emit({ type: "timeline.item", sessionId: childId, item });
   }
 
   /**
@@ -1204,17 +1285,16 @@ function createConnection(
    */
   function trackTaskToolCall(
     state: SessionState,
-    turnChildren: Map<string, string>,
     event: Extract<CursorSDKMessage, { type: "tool_call" }>,
     item: ProviderTimelineItem,
   ): void {
     if (event.name !== "task") return;
     if (item.type !== "tool_call") return;
-    const key = `${state.activeTurnId ?? "turn"}:${event.call_id}`;
-    let childId = turnChildren.get(key);
+    let childId = state.taskChildren.get(event.call_id);
+    const opened = !childId;
     if (!childId) {
       childId = newId("cursor-child");
-      turnChildren.set(key, childId);
+      state.taskChildren.set(event.call_id, childId);
       const taskArgs = taskArgsOf(event.args);
       const child: ChildState = {
         id: childId,
@@ -1224,6 +1304,9 @@ function createConnection(
         subAgentType: taskArgs.subagentType ?? null,
         status: "running",
         items: 0,
+        text: null,
+        reasoning: null,
+        tools: new Map(),
       };
       children.set(childId, child);
       emit({
@@ -1276,16 +1359,17 @@ function createConnection(
         });
       }
     }
-    const child = children.get(childId);
-    if (!child) return;
-    if (event.status !== "running" && child.status === "running") {
-      finishChild(childId, event.status === "error" ? "failed" : "completed");
-    }
+    if (!children.has(childId)) return;
     if (event.status === "running") {
-      appendChildLog(childId, describeTaskArgs(event.args));
-    } else {
-      appendChildLog(childId, describeTaskResult(event.result, event.status === "error"));
+      // The SDK repeats the running card; log the prompt once.
+      if (opened) appendChildLog(childId, describeTaskArgs(event.args));
+      const pending = state.pendingTaskUpdates.get(event.call_id);
+      state.pendingTaskUpdates.delete(event.call_id);
+      for (const update of pending ?? []) applyTaskUpdate(childId, update);
+      return;
     }
+    appendChildLog(childId, describeTaskResult(event.result, event.status === "error"));
+    finishChild(childId, event.status === "error" ? "failed" : "completed");
   }
 
   function finishChild(childId: string, status: "completed" | "failed"): void {

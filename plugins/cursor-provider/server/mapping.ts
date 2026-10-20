@@ -10,6 +10,7 @@ import type {
   CursorModelListItem,
   CursorModelParameter,
   CursorSDKMessage,
+  CursorTaskUpdate,
   CursorToolName,
   CursorTokenUsage,
 } from "./cursor-sdk-types.js";
@@ -1050,4 +1051,40 @@ export function toUsageWithCost(
 
 export function newId(prefix: string): string {
   return `${prefix}:${randomUUID()}`;
+}
+
+/**
+ * A subagent's nested tool update as a live-stream `tool_call` message, so it
+ * maps through toTimelineItem like a parent tool call. Status follows the SDK's
+ * own rule: an explicit status wins, otherwise completed once the call ends.
+ * Returns null while the SDK has not resolved the tool (no `toolCall.type`).
+ */
+export function taskUpdateToolCall(
+  update: CursorTaskUpdate,
+): Extract<CursorSDKMessage, { type: "tool_call" }> | null {
+  if (
+    update.type !== "tool-call-started" &&
+    update.type !== "partial-tool-call" &&
+    update.type !== "tool-call-completed"
+  ) {
+    return null;
+  }
+  const tool = update.toolCall;
+  if (!tool || typeof tool.type !== "string" || !update.callId) return null;
+  const status =
+    update.status === "running" || update.status === "completed" || update.status === "error"
+      ? update.status
+      : update.type === "tool-call-completed"
+        ? "completed"
+        : "running";
+  return {
+    type: "tool_call",
+    agent_id: "",
+    run_id: "",
+    call_id: update.callId,
+    name: tool.type,
+    status,
+    ...(tool.args !== undefined ? { args: tool.args } : {}),
+    ...(tool.result !== undefined ? { result: tool.result } : {}),
+  };
 }

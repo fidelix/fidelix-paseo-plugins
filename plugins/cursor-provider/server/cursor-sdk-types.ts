@@ -122,6 +122,7 @@ export interface CursorAgent {
       model?: CursorModelSelection;
       mode?: "agent" | "plan";
       mcpServers?: Record<string, CursorMcpServerConfig>;
+      onDelta?: (args: { update: CursorInteractionUpdate }) => void | Promise<void>;
     },
   ): Promise<CursorRun>;
   close(): void;
@@ -157,6 +158,28 @@ export type CursorSDKMessage =
   | { type: "task"; agent_id: string; run_id: string; status?: string; text?: string }
   | { type: "request"; agent_id: string; run_id: string; request_id: string }
   | { type: "usage"; agent_id: string; run_id: string; usage: CursorTokenUsage };
+
+/**
+ * Nested update from a running subagent (`task` tool), delivered through the
+ * `send` option `onDelta` as `{ type: "tool-call-delta", callId, taskUpdate }`
+ * (vendor/cursor-sdk-shared/delta-types NestedTaskUpdateSchema). `callId` is
+ * the parent's `task` call id; the nested tool `callId` is the subagent's own.
+ */
+export type CursorTaskUpdate =
+  | { type: "text-delta"; text: string }
+  | { type: "thinking-delta"; text: string }
+  | { type: "thinking-completed" }
+  | {
+      type: "tool-call-started" | "partial-tool-call" | "tool-call-completed";
+      callId: string;
+      status?: string;
+      toolCall?: { type?: string; args?: unknown; result?: unknown } | null;
+    }
+  | { type: "step-started" | "step-completed" | "tool-requests-listed" };
+
+export type CursorInteractionUpdate =
+  | { type: "tool-call-delta"; callId: string; modelCallId?: string; taskUpdate: CursorTaskUpdate }
+  | { type: string };
 
 export interface CursorAgentMessage {
   type: "user" | "assistant";

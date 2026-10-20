@@ -80,7 +80,9 @@ reload) is cancelled on the next resume, so the agent does not fail with
 - Session persistence / listing / configure; usage reporting
   (input, cached-input, output tokens).
 - `task`-tool subagents surfaced as provider-owned child sessions
-  (`restoration: "parent"`) with log rows.
+  (`restoration: "parent"`). The subagent's text, reasoning and tool calls
+  stream into the child through the `send` option `onDelta`; `run.stream()`
+  only carries the parent's `task` card.
 - Transient-failure retry: rate-limit / quota (`resource_exhausted`, 429 family) and
   network (5xx / timeout / unavailable) errors retry up to 3 total attempts with
   1s → 15s capped exponential backoff and a visible warning notice per retry
@@ -122,6 +124,10 @@ reload) is cancelled on the next resume, so the agent does not fail with
   models that expose it, and unset follows the default variant.
 - History replay on resume is best-effort (last ~20 messages) and never blocks
   session open.
+- **Subagents block their parent and can't be prompted.** The SDK's `task`
+  tool is synchronous: the parent waits until the subagent returns, and the
+  tool takes no background flag. The SDK has no handle for messaging a running
+  subagent, so the child session is read-only (no capabilities).
 
 ## Parity vs the built-in `cursor` provider
 
