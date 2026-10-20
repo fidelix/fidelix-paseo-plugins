@@ -9,7 +9,7 @@ import type {
   CursorTokenUsage,
 } from "./cursor-sdk-types.ts";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
-import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDelegation, DELEGATION_NOTE, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
+import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDelegation, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
 
 const IDS = { itemId: "item:1" };
 
@@ -623,11 +623,5 @@ describe("usesPaseoDelegation", () => {
     assert.equal(usesPaseoDelegation({ mcpServers: { other: {} } }), false);
     assert.equal(usesPaseoDelegation({ mcpServers: {} }), false);
     assert.equal(usesPaseoDelegation({}), false);
-  });
-
-  it("names the replacement tools in the note", () => {
-    for (const tool of ["create_agent", "send_agent_prompt", "get_agent_status"]) {
-      assert.ok(DELEGATION_NOTE.includes(tool), tool);
-    }
   });
 });

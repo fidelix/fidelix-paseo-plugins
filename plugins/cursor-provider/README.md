@@ -81,10 +81,10 @@ reload) is cancelled on the next resume, so the agent does not fail with
   (input, cached-input, output tokens).
 - Subagents are Paseo agents. When the daemon gives the session its `paseo`
   MCP server (Paseo tools on, the default), Cursor's `task` tool is disabled
-  (`disallowedTools: ["task"]`, re-passed on every resume) and the first
-  prompt of each runtime tells the model to delegate with `create_agent`.
-  These run in parallel with the parent, show up in Paseo, and take
-  follow-ups (`send_agent_prompt`).
+  (`disallowedTools: ["task"]`, re-passed on every resume), so the model
+  delegates through Paseo's `create_agent` tool, found from its description
+  as with every other provider. These run in parallel with the parent, show
+  up in Paseo, and take follow-ups.
 - Without the `paseo` server, Cursor's own `task` subagents run as
   provider-owned child sessions (`restoration: "parent"`). Their text,
   reasoning and tool calls stream into the child through the `send` option
@@ -135,8 +135,7 @@ reload) is cancelled on the next resume, so the agent does not fail with
   SDK has no handle for messaging a running subagent, so that child session is
   read-only. This is why Paseo agents replace it by default.
 - **`systemPrompt` replaces Cursor's whole harness prompt** (SDK
-  `AgentOptions.systemPrompt`, server-gated), so plugin guidance goes in the
-  first prompt instead.
+  `AgentOptions.systemPrompt`, server-gated).
 
 ## Parity vs the built-in `cursor` provider
 
