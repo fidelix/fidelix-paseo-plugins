@@ -21,7 +21,7 @@
 // every machine except the one it was written on.
 const path = require("node:path");
 const os = require("node:os");
-const { readFileSync, existsSync, readdirSync } = require("node:fs");
+const { readFileSync, existsSync, readdirSync, statSync } = require("node:fs");
 
 let cached = null;
 let cachedSqlite = null;
@@ -114,18 +114,45 @@ function findInPluginsStore() {
     }
   }
   if (matches.length === 0) return null;
-  // Prefer the canonical package when several installs exist.
-  for (const dir of matches) {
+  // Several copies exist while an update runs: the daemon installs the new
+  // revision before it removes the old one, and this process can start in
+  // between. Binding to the old copy breaks once it is deleted (the SDK loads
+  // chunks lazily), so prefer the canonical package, then copies with the SDK
+  // actually installed, then the newest install.
+  const ranked = matches
+    .map((dir) => ({ dir, ...rankInstall(dir) }))
+    .sort(
+      (a, b) =>
+        Number(b.canonical) - Number(a.canonical) ||
+        Number(b.installed) - Number(a.installed) ||
+        b.installedAt - a.installedAt,
+    );
+  return path.join(ranked[0].dir, "package.json");
+}
+
+function rankInstall(dir) {
+  let canonical = false;
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
+    canonical = Boolean(manifest && manifest.name === "cursor-provider-plugin");
+  } catch {
+    // ignore
+  }
+  if (!existsSync(path.join(dir, "node_modules", "@cursor", "sdk", "package.json"))) {
+    return { canonical, installed: false, installedAt: 0 };
+  }
+  // npm stamps extracted package files with a fixed 1985 mtime; its own
+  // lockfile copy is written at install time.
+  let installedAt = 0;
+  for (const marker of [path.join("node_modules", ".package-lock.json"), "node_modules"]) {
     try {
-      const manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
-      if (manifest && manifest.name === "cursor-provider-plugin") {
-        return path.join(dir, "package.json");
-      }
+      installedAt = statSync(path.join(dir, marker)).mtimeMs;
+      break;
     } catch {
-      // ignore
+      // try the next marker
     }
   }
-  return path.join(matches[0], "package.json");
+  return { canonical, installed: true, installedAt };
 }
 
 function findAnchor() {

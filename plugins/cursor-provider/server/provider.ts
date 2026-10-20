@@ -324,6 +324,10 @@ function createConnection(
   let closed = false;
   /** Last catalog failure logged, so a broken key does not spam every refresh. */
   let lastCatalogError: string | null = null;
+  /** In-flight `Cursor.models.list` per API key (see fetchCatalog). */
+  const catalogFetches = new Map<string, Promise<{ models: ProviderModel[]; raw: CursorModelListItem[] }>>();
+  /** When the last catalog fetch failed; fetches pause for CATALOG_RETRY_MS after. */
+  let catalogFailedAt = 0;
 
   function emit(event: ProviderEvent): void {
     if (closed) return;
@@ -519,22 +523,80 @@ function createConnection(
     return invalidateCatalog.write(models, raw);
   }
 
+  /**
+   * One `Cursor.models.list` call per key at a time. Cursor rate-limits the
+   * endpoint (30/min), and a daemon restart reopens every agent at once: one
+   * call per session open used to trip the limit and fail the opens.
+   */
+  function fetchCatalog(
+    apiKey: string | undefined,
+  ): Promise<{ models: ProviderModel[]; raw: CursorModelListItem[] }> {
+    const key = apiKey ?? "";
+    let pending = catalogFetches.get(key);
+    if (!pending) {
+      const { Cursor } = loadCursorSdk();
+      pending = (Cursor.models.list(apiKey ? { apiKey } : {}) as Promise<CursorModelListItem[]>)
+        .then((raw) => {
+          catalogFailedAt = 0;
+          lastCatalogError = null;
+          return writeCache(toProviderModels(raw), raw);
+        })
+        .catch((error: unknown) => {
+          catalogFailedAt = Date.now();
+          logCatalogFailure(error);
+          throw error;
+        })
+        .finally(() => catalogFetches.delete(key));
+      catalogFetches.set(key, pending);
+    }
+    return pending;
+  }
+
+  function catalogCoolingDown(): boolean {
+    return catalogFailedAt > 0 && Date.now() - catalogFailedAt < CATALOG_RETRY_MS;
+  }
+
+  /** Log the real reason once per distinct failure (a bad key looks like a one-model catalog). */
+  function logCatalogFailure(error: unknown): void {
+    const message = toProviderError(error).message;
+    if (message === lastCatalogError) return;
+    lastCatalogError = message;
+    console.error(
+      `cursor-sdk provider: model catalog unavailable (${message}); serving the fallback catalog. Check the API key or sign in from the Cursor settings screen.`,
+    );
+  }
+
+  /**
+   * Catalog for a session open. Never fails the open: without a catalog the
+   * session starts on the fallback list and adopts the real one on its next
+   * prompt (adoptCatalog).
+   */
   async function ensureCatalog(
     config: ProviderSessionConfig,
   ): Promise<{ models: ProviderModel[]; raw: CursorModelListItem[] }> {
     const cached = readCache();
     if (cached) return { models: cached.models, raw: cached.raw };
-    // No explicit key required: the SDK falls back to CURSOR_API_KEY and
-    // then the stored Cursor.auth.login() key by itself. Pass it through
-    // only when the user configured one explicitly (env override, plugin
-    // settings); otherwise omit it so the SDK's own fallback chain runs.
-    const apiKey = await readKey(config);
-    const { Cursor } = loadCursorSdk();
-    const raw = (await Cursor.models.list(
-      apiKey ? { apiKey } : {},
-    )) as CursorModelListItem[];
-    const written = writeCache(toProviderModels(raw), raw);
-    return { models: written.models, raw: written.raw };
+    if (!catalogCoolingDown()) {
+      // No explicit key required: the SDK falls back to CURSOR_API_KEY and
+      // then the stored Cursor.auth.login() key by itself. Pass it through
+      // only when the user configured one explicitly (env override, plugin
+      // settings); otherwise omit it so the SDK's own fallback chain runs.
+      try {
+        return await fetchCatalog(await readKey(config));
+      } catch {
+        // Logged in fetchCatalog; fall through to the fallback list.
+      }
+    }
+    return { models: [...fallbackCatalog().models], raw: [] };
+  }
+
+  /** A session opened on the fallback list picks up the real catalog once it exists. */
+  function adoptCatalog(state: SessionState): void {
+    if (state.rawModels.length > 0) return;
+    const cached = readCache();
+    if (!cached) return;
+    state.models = cached.models;
+    state.rawModels = cached.raw;
   }
 
   async function dispatch(input: ProviderInput): Promise<void> {
@@ -549,31 +611,24 @@ function createConnection(
         // otherwise let the SDK use CURSOR_API_KEY / stored login itself.
         // No key anywhere just fails the list call, which falls back below.
         const apiKey = (await readStoredApiKey(settings)) ?? readProcessApiKey();
-        try {
-          const { Cursor } = loadCursorSdk();
-          const raw = (await Cursor.models.list(
-            apiKey ? { apiKey } : {},
-          )) as CursorModelListItem[];
-          const cached = writeCache(toProviderModels(raw), raw);
-          lastCatalogError = null;
+        const cached = readCache();
+        if (catalogCoolingDown()) {
           emit({
             type: "catalog",
             requestId: input.requestId,
-            catalog: toCatalog(cached.models),
+            catalog: cached ? toCatalog(cached.models) : fallbackCatalog(),
           });
-        } catch (error) {
-          // A bad/expired key makes the SDK return one fallback model. Log the
-          // real reason once per distinct failure so "only composer-2.5 shows
-          // up" is diagnosable from daemon.log instead of looking like a
-          // catalog with one entry.
-          const message = toProviderError(error).message;
-          if (message !== lastCatalogError) {
-            lastCatalogError = message;
-            console.error(
-              `cursor-sdk provider: model catalog unavailable (${message}); serving the fallback catalog. Check the API key or sign in from the Cursor settings screen.`,
-            );
-          }
-          emit({ type: "catalog", requestId: input.requestId, catalog: fallbackCatalog() });
+          return;
+        }
+        try {
+          const fresh = await fetchCatalog(apiKey);
+          emit({ type: "catalog", requestId: input.requestId, catalog: toCatalog(fresh.models) });
+        } catch {
+          emit({
+            type: "catalog",
+            requestId: input.requestId,
+            catalog: cached ? toCatalog(cached.models) : fallbackCatalog(),
+          });
         }
         return;
       }
@@ -923,6 +978,7 @@ function createConnection(
 
   async function runPrompt(state: SessionState, prompt: ProviderPrompt): Promise<void> {
     if (!state.agent) throw new Error("Cursor session is not open");
+    adoptCatalog(state);
     if (prompt.input.type === "command" && commandPromptText(prompt.input) === null) {
       emit({
         type: "session.prompt_result",
@@ -1707,6 +1763,9 @@ function createConnection(
     },
   };
 }
+
+/** Pause after a failed catalog fetch (rate limit, outage) before calling again. */
+const CATALOG_RETRY_MS = 30_000;
 
 /**
  * Slash commands published via session.commands. The SDK has no command
