@@ -17,6 +17,14 @@ export type CursorPluginSettings = PluginSettings<(typeof cursorSettings)["schem
 
 import { z } from "zod";
 import { loadCursorSdk } from "./cursor-sdk-loader.js";
+import type { CursorLocalAgentStore } from "./cursor-sdk-loader.js";
+import {
+  importLegacyAgent,
+  listLegacyAgents,
+  openLocalStore,
+  settleOrphanedRun,
+  sqliteStateRoot,
+} from "./local-store.js";
 import type {
   CursorAgent,
   CursorAgentUsage,
@@ -126,7 +134,6 @@ interface ChildState {
   toolCallId: string | null;
   description: string | null;
   subAgentType: string | null;
-  logLines: string[];
   status: "running" | "completed" | "failed";
   items: number;
 }
@@ -161,21 +168,16 @@ function storeRoot(config: Pick<ProviderSessionConfig, "env">): string {
   return path.join(base, "paseo-plugin");
 }
 
-function openStore(config: ProviderSessionConfig): unknown {
-  const { JsonlLocalAgentStore } = loadCursorSdk();
+/** SQLite store for the session's workspace (see local-store.ts). */
+async function openStore(config: Pick<ProviderSessionConfig, "env" | "cwd">): Promise<CursorLocalAgentStore> {
   const root = storeRoot(config);
   try {
-    return new JsonlLocalAgentStore(root);
+    return await openLocalStore(root, config.cwd);
   } catch (error) {
     throw new Error(
-      `Cursor local store is unusable at ${root}: ${error instanceof Error ? error.message : String(error)}`,
+      `Cursor local store is unusable at ${sqliteStateRoot(root, config.cwd)}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-}
-
-/** Open the local store for a cwd without a full session config (sessions list). */
-function openStoreForCwd(cwd: string): unknown {
-  return openStore({ env: {}, cwd, mcpServers: {}, settings: {}, persist: false });
 }
 
 function promptText(prompt: ProviderPrompt): {
@@ -447,13 +449,26 @@ function createConnection(
       };
       const listed = (
         await Promise.all(
-          cwds.map((cwd) =>
-            listable.list({ runtime: "local", cwd, store: openStoreForCwd(cwd) }).catch(() => ({
-              items: [] as StoredAgentInfo[],
-            })),
-          ),
+          cwds.map(async (cwd) => {
+            const config = { env: {}, cwd };
+            const stored = await openStore(config)
+              .then((store) => listable.list({ runtime: "local", cwd, store }))
+              .catch(() => ({ items: [] as StoredAgentInfo[] }));
+            // Agents not yet imported from the legacy JSONL store stay
+            // listed; opening one imports it (see openSession).
+            const legacy = await listLegacyAgents(storeRoot(config), cwd);
+            return [
+              ...(stored.items ?? []),
+              ...legacy.map((agent): StoredAgentInfo => ({
+                agentId: agent.agentId,
+                cwd: agent.cwd,
+                ...(typeof agent["name"] === "string" ? { name: agent["name"] } : {}),
+                lastModified: agent.updatedAt,
+              })),
+            ];
+          }),
         )
-      ).flatMap((result) => result.items ?? []);
+      ).flat();
       const stored = [...listed].sort(
         (a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0),
       );
@@ -662,6 +677,7 @@ function createConnection(
         if (state) {
           state.closed = true;
           sessions.delete(input.sessionId);
+          forgetPermissions(input.sessionId);
           cancelActiveTurn(state, false);
           // Closing the SDK agent can wait on the runtime; the daemon only
           // needs the session gone, so finish teardown in the background.
@@ -733,10 +749,11 @@ function createConnection(
     // Explicit key when configured; otherwise omit so the SDK falls back to
     // CURSOR_API_KEY / stored login itself.
     const apiKey = await readKey(config);
-    const store = openStore(config);
+    const store = await openStore(config);
     const persistedAgentId = persistence
       ? persistenceSchema.parse(persistence).data.agentId
       : undefined;
+    if (persistedAgentId) await prepareResume(store, config, persistedAgentId);
     const tools = sessionTools(state);
     const agent = (
       persistedAgentId
@@ -790,6 +807,45 @@ function createConnection(
       await replayHistory(state, agent, config);
     }
     emit({ type: "session.ready", requestId, sessionId: state.id });
+  }
+
+  /**
+   * Before `Agent.resume`: import the agent from the legacy JSONL store if it
+   * predates the SQLite store, then settle a run the store still marks active
+   * although no run for the agent is live here. That run belonged to a plugin
+   * process that crashed or reloaded; left alone, every send fails with
+   * "Agent … already has active run".
+   */
+  async function prepareResume(
+    store: CursorLocalAgentStore,
+    config: ProviderSessionConfig,
+    agentId: string,
+  ): Promise<void> {
+    const root = storeRoot(config);
+    const imported = await importLegacyAgent(store, sqliteStateRoot(root, config.cwd), root, agentId);
+    if (imported === "imported") {
+      console.error(`cursor-sdk provider: imported ${agentId} from the legacy JSONL store`);
+    }
+    if (hasLiveRun(agentId)) return;
+    const settled = await settleOrphanedRun(store, agentId);
+    if (settled) {
+      console.error(`cursor-sdk provider: cancelled orphaned run ${settled} of ${agentId}`);
+    }
+  }
+
+  function hasLiveRun(agentId: string): boolean {
+    for (const other of sessions.values()) {
+      if (other.agent?.agentId !== agentId) continue;
+      if (other.activeRun || other.sendPending || other.cancelPending) return true;
+    }
+    return false;
+  }
+
+  /** Drop pending input requests of a session that is going away. */
+  function forgetPermissions(sessionId: string): void {
+    for (const [permissionId, pending] of permissions) {
+      if (pending.sessionId === sessionId) permissions.delete(permissionId);
+    }
   }
 
   function applyConfigure(state: SessionState, changes: ProviderConfigChanges): void {
@@ -1195,7 +1251,6 @@ function createConnection(
         toolCallId: item.callId,
         description: taskArgs.description ?? null,
         subAgentType: taskArgs.subagentType ?? null,
-        logLines: [],
         status: "running",
         items: 0,
       };
@@ -1285,7 +1340,6 @@ function createConnection(
     const child = children.get(childId);
     if (!child || child.status !== "running") return;
     child.items += 1;
-    child.logLines.push(line);
     emit({
       type: "timeline.item",
       sessionId: childId,
@@ -1305,7 +1359,7 @@ function createConnection(
     void agent;
     try {
       const { Agent } = loadCursorSdk();
-      const store = openStore(config);
+      const store = await openStore(config);
       const messages = (await Agent.messages.list(state.agent?.agentId ?? "", {
         runtime: "local",
         cwd: config.cwd,
@@ -1469,7 +1523,7 @@ function createConnection(
     // daemon replays prefix history from its own timeline store.
     const { Agent } = loadCursorSdk();
     const apiKey = await readKey(state.config);
-    const store = openStore(state.config);
+    const store = await openStore(state.config);
     // Re-create honors the same tool restriction as openSession (tools are
     // not persisted by the SDK; the reverted runtime must re-apply them).
     const tools = sessionTools(state);
@@ -1524,6 +1578,7 @@ function createConnection(
       cancelActiveTurn(state, false);
       await closeAgent(state).catch(() => undefined);
       sessions.delete(sessionId);
+      forgetPermissions(sessionId);
       emit({ type: "session.closed", sessionId });
     }
   }
@@ -1572,6 +1627,7 @@ function createConnection(
       );
       sessions.clear();
       children.clear();
+      permissions.clear();
       listeners.clear();
     },
   };

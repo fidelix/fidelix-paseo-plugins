@@ -1,7 +1,7 @@
 # Cursor provider plugin
 
 Community Paseo provider that runs the Cursor coding agent through the official
-`@cursor/sdk` (local runtime, JSONL store) instead of the `cursor-agent` ACP binary.
+`@cursor/sdk` (local runtime, SQLite store) instead of the `cursor-agent` ACP binary.
 It registers provider id `cursor-sdk` ("Cursor SDK", `server/provider.ts:203`).
 
 ## Requirements
@@ -48,8 +48,23 @@ a single `composer-2.5` entry.
 
 ### 3. Local state
 
-Sessions persist in a JSONL store under `~/.cursor/sdk/paseo-plugin`.
-Override the root with `CURSOR_SDK_STATE_ROOT` (per-agent env or daemon env).
+Sessions persist in the SDK's SQLite store (`@cursor/sdk/sqlite`, backed by
+`node:sqlite`), one state root per workspace under
+`~/.cursor/sdk/paseo-plugin/sqlite/<sha256(cwd)>` (`server/local-store.ts`).
+Override the base with `CURSOR_SDK_STATE_ROOT` (per-agent env or daemon env).
+
+Older versions used the SDK's `JsonlLocalAgentStore`, which re-reads, re-parses
+and rewrites a whole NDJSON file on every operation. With every agent sharing
+one store, each checkpoint write cost about 1 GB of transient heap, and the
+plugin process ran out of memory after a few minutes to a few hours. Agents
+from that store (`agents.ndjson`, `runs.ndjson`, `checkpoints.ndjson` in
+`~/.cursor/sdk/paseo-plugin`) still list and resume: the first resume streams
+that agent's rows into the SQLite store. The legacy files are never modified;
+delete them once every agent you care about has been resumed once.
+
+A run the store still marks active after the plugin process died (crash,
+reload) is cancelled on the next resume, so the agent does not fail with
+`Agent … already has active run`.
 
 ## What works
 
@@ -85,7 +100,7 @@ Override the root with `CURSOR_SDK_STATE_ROOT` (per-agent env or daemon env).
   starts a fresh native agent, and the daemon replays the surviving prefix from its
   own timeline.
 - **Archive/unarchive are local-runtime operations.** Archive closes the live
-  runtime and drops provider-owned children; the durable JSONL record stays
+  runtime and drops provider-owned children; the durable SQLite record stays
   resumable via `Agent.resume`. Unarchive is a no-op validation. The SDK's
   **cloud-only `Agent.archive` / `Agent.unarchive` / `Agent.delete` statics are
   unused** — nothing is ever deleted server-side by this provider.
@@ -121,7 +136,7 @@ The built-in provider shells out to `cursor-agent acp`
 | Text / image prompts | Yes | Yes | Works |
 | `agent` / `plan` modes | Yes | Yes | Works |
 | MCP servers | Yes | Yes (stdio + http/sse) | Works |
-| Session persistence / listing | Yes | Yes (local JSONL store) | Works |
+| Session persistence / listing | Yes | Yes (local SQLite store) | Works |
 | Model catalog | Live, per-model `thought_level` thinking options | Live list, per-model effort-value thinking dropdown | Works |
 | Fast mode toggle | Yes (`fast` feature) | Yes (`Off`/`Fast` select, only on models with a `fast` param) | Works |
 | Slash commands | Dynamic via `available_commands_update` | Static `/plan` `/compact` `/review` `/commit` | Degraded |
