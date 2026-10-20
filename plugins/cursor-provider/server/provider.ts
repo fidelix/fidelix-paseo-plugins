@@ -53,6 +53,8 @@ import {
   taskArgsOf,
   taskUpdateToolCall,
   usesPaseoDelegation,
+  contextWindowMaxTokens,
+  estimateContextUsedTokens,
   toJsonValue,
   toProviderError,
   toProviderModels,
@@ -128,6 +130,8 @@ interface SessionState {
   taskChildren: Map<string, string>;
   /** Subagent updates that arrived before their `task` tool call opened the child. */
   pendingTaskUpdates: Map<string, CursorTaskUpdate[]>;
+  /** Top-level model calls that requested tools in the current run (context estimate). */
+  toolRequestCalls: number;
 }
 
 interface ChildState {
@@ -667,6 +671,7 @@ function createConnection(
           userMessageIds: [],
           taskChildren: new Map(),
           pendingTaskUpdates: new Map(),
+          toolRequestCalls: 0,
         };
         sessions.set(input.sessionId, state);
         try {
@@ -1114,10 +1119,14 @@ function createConnection(
           return { status: "cancelled" };
         }
         state.activeRun = run;
+        state.toolRequestCalls = 0;
         await drainRun(state, run, turnId);
         const result = await run.wait();
         if (state.activeTurnId !== turnId) return { status: "cancelled" };
-        emitTurnUsage(state, turnId, toUsageWithCost(result.usage, await readTurnCostUsd(state)));
+        emitTurnUsage(state, turnId, {
+          ...toUsageWithCost(result.usage, await readTurnCostUsd(state)),
+          ...contextUsage(state, result.usage),
+        });
         if (state.activeTurnId !== turnId) return { status: "cancelled" };
         if (result.status === "finished") return { status: "finished" };
         if (result.status === "cancelled") return { status: "cancelled" };
@@ -1196,6 +1205,20 @@ function createConnection(
     } catch {
       return undefined;
     }
+  }
+
+  /** Context window fields for a finished run (see estimateContextUsedTokens). */
+  function contextUsage(
+    state: SessionState,
+    usage: Parameters<typeof estimateContextUsedTokens>[0],
+  ): Pick<ProviderUsage, "contextWindowMaxTokens" | "contextWindowUsedTokens"> {
+    const max = contextWindowMaxTokens(state.rawModels, state.model ?? DEFAULT_CURSOR_MODEL);
+    // Every run ends with one model call that requests no tools (the answer).
+    const used = estimateContextUsedTokens(usage, state.toolRequestCalls + 1);
+    return {
+      ...(max !== undefined ? { contextWindowMaxTokens: max } : {}),
+      ...(used !== undefined ? { contextWindowUsedTokens: max !== undefined ? Math.min(used, max) : used } : {}),
+    };
   }
 
   function emitTurnUsage(
@@ -1279,7 +1302,12 @@ function createConnection(
    * Runs inline on the SDK's delta path, so it must stay synchronous and cheap.
    */
   function acceptDelta(state: SessionState, turnId: string, update: CursorInteractionUpdate): void {
-    if (update.type !== "tool-call-delta" || state.closed || state.activeTurnId !== turnId) return;
+    if (state.closed || state.activeTurnId !== turnId) return;
+    if (update.type === "tool-requests-listed") {
+      state.toolRequestCalls += 1;
+      return;
+    }
+    if (update.type !== "tool-call-delta") return;
     const { callId, taskUpdate } = update as Extract<CursorInteractionUpdate, { type: "tool-call-delta" }>;
     const childId = state.taskChildren.get(callId);
     if (childId) {

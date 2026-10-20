@@ -128,6 +128,11 @@ reload) is cancelled on the next resume, so the agent does not fail with
   to the new model's default. `context` (window size) always follows the
   default variant; `fast` is a separate `Off`/`Fast` select shown only on
   models that expose it, and unset follows the default variant.
+- **Context window usage is an estimate.** The window size is exact (the
+  model's default `context` variant, e.g. 1M). Cursor reports no per-call or
+  context-size figure, only one usage total per run summed over every model
+  call, so "used" is that run's prompt tokens divided by its model calls. It
+  updates when a turn ends and slightly undercounts the last call.
 - History replay on resume is best-effort (last ~20 messages) and never blocks
   session open.
 - **Cursor `task` subagents (fallback only) block their parent and can't be

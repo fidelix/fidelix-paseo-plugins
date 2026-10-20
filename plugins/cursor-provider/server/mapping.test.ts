@@ -9,7 +9,7 @@ import type {
   CursorTokenUsage,
 } from "./cursor-sdk-types.ts";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
-import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDelegation, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
+import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDelegation, contextWindowMaxTokens, estimateContextUsedTokens, parseTokenCount, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
 
 const IDS = { itemId: "item:1" };
 
@@ -623,5 +623,39 @@ describe("usesPaseoDelegation", () => {
     assert.equal(usesPaseoDelegation({ mcpServers: { other: {} } }), false);
     assert.equal(usesPaseoDelegation({ mcpServers: {} }), false);
     assert.equal(usesPaseoDelegation({}), false);
+  });
+});
+
+describe("context window", () => {
+  const opus = {
+    id: "claude-opus-5-5",
+    displayName: "Opus 5.5",
+    parameters: [{ id: "context", values: [{ value: "300k" }, { value: "1m" }] }],
+    variants: [
+      { displayName: "default", isDefault: true, params: [{ id: "context", value: "1m" }, { id: "effort", value: "medium" }] },
+    ],
+  };
+
+  it("parses Cursor's context values", () => {
+    assert.equal(parseTokenCount("1m"), 1_000_000);
+    assert.equal(parseTokenCount("300k"), 300_000);
+    assert.equal(parseTokenCount("256K"), 256_000);
+    assert.equal(parseTokenCount("128000"), 128_000);
+    assert.equal(parseTokenCount("auto"), undefined);
+    assert.equal(parseTokenCount(undefined), undefined);
+  });
+
+  it("takes the window from the default variant", () => {
+    assert.equal(contextWindowMaxTokens([opus], "claude-opus-5-5"), 1_000_000);
+    assert.equal(contextWindowMaxTokens([opus], "unknown"), undefined);
+    assert.equal(contextWindowMaxTokens([{ id: "gpt-5-mini", displayName: "mini" }], "gpt-5-mini"), undefined);
+  });
+
+  it("estimates context as prompt tokens per model call", () => {
+    // Recorded run: 3 model calls, input excludes cache reads (totalTokens 27797).
+    const usage = { inputTokens: 20556, outputTokens: 329, cacheReadTokens: 6912, cacheWriteTokens: 0, totalTokens: 27797 };
+    assert.equal(estimateContextUsedTokens(usage, 3), 9156);
+    assert.equal(estimateContextUsedTokens(usage, 0), undefined);
+    assert.equal(estimateContextUsedTokens(undefined, 3), undefined);
   });
 });

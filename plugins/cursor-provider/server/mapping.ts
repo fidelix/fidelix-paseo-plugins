@@ -1049,6 +1049,45 @@ export function toUsageWithCost(
   return out;
 }
 
+/**
+ * Context window size for a model. The plugin never sends the `context`
+ * param, so the window is the default variant's value ("1m", "300k").
+ */
+export function contextWindowMaxTokens(
+  rawModels: CursorModelListItem[] | undefined,
+  modelId: string | undefined,
+): number | undefined {
+  const raw = findRawModel(rawModels, modelId);
+  if (!raw) return undefined;
+  return parseTokenCount(defaultVariantParamMap(raw).get("context"));
+}
+
+/** "1m" -> 1_000_000, "300k" -> 300_000, "128000" -> 128_000. */
+export function parseTokenCount(value: string | undefined): number | undefined {
+  const match = value?.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([km]?)$/);
+  if (!match) return undefined;
+  const scale = match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
+  return Math.round(Number(match[1]) * scale);
+}
+
+/**
+ * Estimated context in use after a run. Cursor reports one usage total per
+ * run, summed over every model call, and no per-call or context figure (the
+ * server only sends context tokens to preCompact hooks). Each call resends
+ * the whole conversation, so prompt tokens per call is the closest available
+ * measure; it slightly undercounts the final call. `inputTokens` excludes
+ * cache reads and writes (totalTokens is the sum of all four).
+ */
+export function estimateContextUsedTokens(
+  usage: CursorTokenUsage | undefined,
+  modelCalls: number,
+): number | undefined {
+  if (!usage || modelCalls < 1) return undefined;
+  const prompt = (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+  if (prompt <= 0) return undefined;
+  return Math.round(prompt / modelCalls);
+}
+
 export function newId(prefix: string): string {
   return `${prefix}:${randomUUID()}`;
 }
