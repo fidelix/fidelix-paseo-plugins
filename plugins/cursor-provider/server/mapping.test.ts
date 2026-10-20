@@ -9,7 +9,7 @@ import type {
   CursorTokenUsage,
 } from "./cursor-sdk-types.ts";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
-import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
+import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDelegation, DELEGATION_NOTE, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
 
 const IDS = { itemId: "item:1" };
 
@@ -614,5 +614,20 @@ describe("taskUpdateToolCall", () => {
     assert.equal(taskUpdateToolCall({ type: "text-delta", text: "hi" }), null);
     assert.equal(taskUpdateToolCall({ type: "partial-tool-call", callId: "c", toolCall: null }), null);
     assert.equal(taskUpdateToolCall({ type: "tool-call-started", callId: "", toolCall: { type: "ls" } }), null);
+  });
+});
+
+describe("usesPaseoDelegation", () => {
+  it("is on only when the daemon attached the paseo MCP server", () => {
+    assert.equal(usesPaseoDelegation({ mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:6767/mcp/agents" } } }), true);
+    assert.equal(usesPaseoDelegation({ mcpServers: { other: {} } }), false);
+    assert.equal(usesPaseoDelegation({ mcpServers: {} }), false);
+    assert.equal(usesPaseoDelegation({}), false);
+  });
+
+  it("names the replacement tools in the note", () => {
+    for (const tool of ["create_agent", "send_agent_prompt", "get_agent_status"]) {
+      assert.ok(DELEGATION_NOTE.includes(tool), tool);
+    }
   });
 });

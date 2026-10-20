@@ -52,6 +52,8 @@ import {
   stepToSDKMessage,
   taskArgsOf,
   taskUpdateToolCall,
+  DELEGATION_NOTE,
+  usesPaseoDelegation,
   toJsonValue,
   toProviderError,
   toProviderModels,
@@ -123,6 +125,8 @@ interface SessionState {
   turnSeq: number;
   /** user_message timeline ids in order, for revert targeting. */
   userMessageIds: string[];
+  /** Whether this runtime's model has been told how to delegate (see DELEGATION_NOTE). */
+  delegationNoted: boolean;
   /** Child session per SDK `task` call id in the active turn. */
   taskChildren: Map<string, string>;
   /** Subagent updates that arrived before their `task` tool call opened the child. */
@@ -611,6 +615,7 @@ function createConnection(
           userMessageIds: [],
           taskChildren: new Map(),
           pendingTaskUpdates: new Map(),
+          delegationNoted: false,
         };
         sessions.set(input.sessionId, state);
         try {
@@ -760,12 +765,14 @@ function createConnection(
             ...(apiKey ? { apiKey } : {}),
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
+            ...(usesPaseoDelegation(config) ? { disallowedTools: ["task"] } : {}),
             local: { cwd: config.cwd, store },
           })
         : await Agent.create({
             ...(apiKey ? { apiKey } : {}),
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
+            ...(usesPaseoDelegation(config) ? { disallowedTools: ["task"] } : {}),
             local: {
               cwd: config.cwd,
               store,
@@ -828,6 +835,17 @@ function createConnection(
       if (other.activeRun || other.sendPending || other.cancelPending) return true;
     }
     return false;
+  }
+
+  /**
+   * Text sent to the model for a prompt: the first prompt of each runtime
+   * carries the delegation note when Cursor's `task` tool is replaced by
+   * Paseo agents. The timeline keeps the user's own text.
+   */
+  function modelText(state: SessionState, text: string): string {
+    if (state.delegationNoted || !usesPaseoDelegation(state.config)) return text;
+    state.delegationNoted = true;
+    return `${DELEGATION_NOTE}\n\n${text}`;
   }
 
   /** Drop pending input requests of a session that is going away. */
@@ -967,7 +985,7 @@ function createConnection(
     });
     state.userMessageIds.push(messageId);
     try {
-      const result = await sendWithRetry(state, text, images, turnId, turnAbort.signal);
+      const result = await sendWithRetry(state, modelText(state, text), images, turnId, turnAbort.signal);
       // An interrupt already settled this turn (cleared activeTurnId and
       // emitted `canceled`); never overwrite a newer turn's state.
       if (state.activeTurnId !== turnId) return;
@@ -1582,10 +1600,12 @@ function createConnection(
     // Re-create honors the same tool restriction as openSession (tools are
     // not persisted by the SDK; the reverted runtime must re-apply them).
     const tools = sessionTools(state);
+    state.delegationNoted = false;
     state.agent = (await Agent.create({
       ...(apiKey ? { apiKey } : {}),
       model: resolveModelSelection(state),
       ...(tools ? { tools } : {}),
+      ...(usesPaseoDelegation(state.config) ? { disallowedTools: ["task"] } : {}),
       local: {
         cwd: state.config.cwd,
         store,

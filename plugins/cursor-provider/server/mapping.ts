@@ -1088,3 +1088,26 @@ export function taskUpdateToolCall(
     ...(tool.result !== undefined ? { result: tool.result } : {}),
   };
 }
+
+/**
+ * Subagents run as Paseo agents when the daemon gave the session its `paseo`
+ * MCP server. Cursor's `task` tool blocks the parent until the subagent
+ * returns, takes no background flag, and leaves a child nobody can prompt; a
+ * Paseo agent runs in parallel, shows up in Paseo, and takes follow-ups.
+ * Without the server (Paseo tools disabled for this provider) `task` stays.
+ */
+export function usesPaseoDelegation(config: { mcpServers?: Readonly<Record<string, unknown>> }): boolean {
+  return Object.prototype.hasOwnProperty.call(config.mcpServers ?? {}, PASEO_MCP_SERVER);
+}
+
+const PASEO_MCP_SERVER = "paseo";
+
+export const DELEGATION_NOTE = [
+  "<paseo-delegation>",
+  "Cursor's Task tool is disabled in this session. To delegate work to a subagent, create a Paseo agent with the paseo MCP tool create_agent instead.",
+  "- It runs in parallel: keep working while it runs, and don't wait on it unless you need its result to continue.",
+  "- Give it a complete, self-contained prompt and the same cwd unless the work belongs elsewhere. Default to provider cursor-sdk with your current model.",
+  "- Follow up with send_agent_prompt. Check progress with get_agent_status or get_agent_activity.",
+  "- The user sees these agents in Paseo and can prompt them directly.",
+  "</paseo-delegation>",
+].join("\n");

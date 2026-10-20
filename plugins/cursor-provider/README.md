@@ -79,10 +79,16 @@ reload) is cancelled on the next resume, so the agent does not fail with
 - MCP servers (stdio + http/sse) passed through to the SDK.
 - Session persistence / listing / configure; usage reporting
   (input, cached-input, output tokens).
-- `task`-tool subagents surfaced as provider-owned child sessions
-  (`restoration: "parent"`). The subagent's text, reasoning and tool calls
-  stream into the child through the `send` option `onDelta`; `run.stream()`
-  only carries the parent's `task` card.
+- Subagents are Paseo agents. When the daemon gives the session its `paseo`
+  MCP server (Paseo tools on, the default), Cursor's `task` tool is disabled
+  (`disallowedTools: ["task"]`, re-passed on every resume) and the first
+  prompt of each runtime tells the model to delegate with `create_agent`.
+  These run in parallel with the parent, show up in Paseo, and take
+  follow-ups (`send_agent_prompt`).
+- Without the `paseo` server, Cursor's own `task` subagents run as
+  provider-owned child sessions (`restoration: "parent"`). Their text,
+  reasoning and tool calls stream into the child through the `send` option
+  `onDelta`; `run.stream()` only carries the parent's `task` card.
 - Transient-failure retry: rate-limit / quota (`resource_exhausted`, 429 family) and
   network (5xx / timeout / unavailable) errors retry up to 3 total attempts with
   1s → 15s capped exponential backoff and a visible warning notice per retry
@@ -124,10 +130,13 @@ reload) is cancelled on the next resume, so the agent does not fail with
   models that expose it, and unset follows the default variant.
 - History replay on resume is best-effort (last ~20 messages) and never blocks
   session open.
-- **Subagents block their parent and can't be prompted.** The SDK's `task`
-  tool is synchronous: the parent waits until the subagent returns, and the
-  tool takes no background flag. The SDK has no handle for messaging a running
-  subagent, so the child session is read-only (no capabilities).
+- **Cursor `task` subagents (fallback only) block their parent and can't be
+  prompted.** The tool is synchronous and takes no background flag, and the
+  SDK has no handle for messaging a running subagent, so that child session is
+  read-only. This is why Paseo agents replace it by default.
+- **`systemPrompt` replaces Cursor's whole harness prompt** (SDK
+  `AgentOptions.systemPrompt`, server-gated), so plugin guidance goes in the
+  first prompt instead.
 
 ## Parity vs the built-in `cursor` provider
 
