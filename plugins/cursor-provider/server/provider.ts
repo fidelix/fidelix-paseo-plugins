@@ -53,8 +53,6 @@ import {
   taskArgsOf,
   taskUpdateToolCall,
   usesPaseoDelegation,
-  contextWindowMaxTokens,
-  estimateContextUsedTokens,
   toJsonValue,
   toProviderError,
   toProviderModels,
@@ -62,6 +60,7 @@ import {
   toUsage,
   toUsageWithCost,
 } from "./mapping.js";
+import { readAgentContextWindow } from "./context-window.js";
 import {
   classifyCursorError,
   DEFAULT_RETRY_POLICY,
@@ -130,8 +129,6 @@ interface SessionState {
   taskChildren: Map<string, string>;
   /** Subagent updates that arrived before their `task` tool call opened the child. */
   pendingTaskUpdates: Map<string, CursorTaskUpdate[]>;
-  /** Top-level model calls that requested tools in the current run (context estimate). */
-  toolRequestCalls: number;
 }
 
 interface ChildState {
@@ -671,7 +668,6 @@ function createConnection(
           userMessageIds: [],
           taskChildren: new Map(),
           pendingTaskUpdates: new Map(),
-          toolRequestCalls: 0,
         };
         sessions.set(input.sessionId, state);
         try {
@@ -868,6 +864,7 @@ function createConnection(
     if (persistence && persistedAgentId) {
       await replayHistory(state, agent, config);
     }
+    await emitContextWindow(state);
     emit({ type: "session.ready", requestId, sessionId: state.id });
   }
 
@@ -1119,13 +1116,12 @@ function createConnection(
           return { status: "cancelled" };
         }
         state.activeRun = run;
-        state.toolRequestCalls = 0;
         await drainRun(state, run, turnId);
         const result = await run.wait();
         if (state.activeTurnId !== turnId) return { status: "cancelled" };
         emitTurnUsage(state, turnId, {
           ...toUsageWithCost(result.usage, await readTurnCostUsd(state)),
-          ...contextUsage(state, result.usage),
+          ...(await contextUsage(state, run.id)),
         });
         if (state.activeTurnId !== turnId) return { status: "cancelled" };
         if (result.status === "finished") return { status: "finished" };
@@ -1207,18 +1203,35 @@ function createConnection(
     }
   }
 
-  /** Context window fields for a finished run (see estimateContextUsedTokens). */
-  function contextUsage(
+  /**
+   * Context fill from the conversation checkpoint (`used_tokens` / `max_tokens`).
+   * Empty when the agent has no checkpoint yet. Never falls back to billed
+   * usage: that sum counts every model call and jumps the wrong way on compaction.
+   */
+  async function contextUsage(
     state: SessionState,
-    usage: Parameters<typeof estimateContextUsedTokens>[0],
-  ): Pick<ProviderUsage, "contextWindowMaxTokens" | "contextWindowUsedTokens"> {
-    const max = contextWindowMaxTokens(state.rawModels, state.model ?? DEFAULT_CURSOR_MODEL);
-    // Every run ends with one model call that requests no tools (the answer).
-    const used = estimateContextUsedTokens(usage, state.toolRequestCalls + 1);
-    return {
-      ...(max !== undefined ? { contextWindowMaxTokens: max } : {}),
-      ...(used !== undefined ? { contextWindowUsedTokens: max !== undefined ? Math.min(used, max) : used } : {}),
-    };
+    runId?: string,
+  ): Promise<Pick<ProviderUsage, "contextWindowMaxTokens" | "contextWindowUsedTokens">> {
+    const window = await loadContextWindow(state, runId);
+    if (!window) return {};
+    return { contextWindowMaxTokens: window.maxTokens, contextWindowUsedTokens: window.usedTokens };
+  }
+
+  async function emitContextWindow(state: SessionState): Promise<void> {
+    const usage = await contextUsage(state);
+    if (Object.keys(usage).length === 0) return;
+    emit({ type: "session.usage", sessionId: state.id, usage });
+  }
+
+  async function loadContextWindow(state: SessionState, runId?: string) {
+    const agentId = state.agent?.agentId;
+    if (!agentId) return undefined;
+    try {
+      const store = await openStore(state.config);
+      return await readAgentContextWindow(store, agentId, runId);
+    } catch {
+      return undefined;
+    }
   }
 
   function emitTurnUsage(
@@ -1303,10 +1316,6 @@ function createConnection(
    */
   function acceptDelta(state: SessionState, turnId: string, update: CursorInteractionUpdate): void {
     if (state.closed || state.activeTurnId !== turnId) return;
-    if (update.type === "tool-requests-listed") {
-      state.toolRequestCalls += 1;
-      return;
-    }
     if (update.type !== "tool-call-delta") return;
     const { callId, taskUpdate } = update as Extract<CursorInteractionUpdate, { type: "tool-call-delta" }>;
     const childId = state.taskChildren.get(callId);

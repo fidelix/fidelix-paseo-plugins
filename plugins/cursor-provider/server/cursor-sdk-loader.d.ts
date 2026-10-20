@@ -39,9 +39,14 @@ export interface CursorSdkSqliteModule {
 }
 
 /**
- * Structural subset of the SDK's `LocalAgentStore` (store/local-agent-store.d.ts)
- * used by local-store.ts for orphaned-run recovery.
+ * Structural subset of the SDK's `LocalAgentStore` (store/local-agent-store.d.ts).
+ * `rootBlobId` is the mapped document; `blobId` is the on-disk JSON.
  */
+export interface CursorCheckpointRef {
+  rootBlobId?: string;
+  blobId?: string;
+}
+
 export interface CursorLocalAgentStore {
   agents: {
     get(input: { agentId: string }): Promise<CursorLocalAgentDocument | null>;
@@ -50,6 +55,9 @@ export interface CursorLocalAgentStore {
   runs: {
     get(input: { agentId: string; runId: string }): Promise<CursorLocalAgentRunDocument | null>;
     update(input: { run: CursorLocalAgentRunDocument }): Promise<unknown>;
+  };
+  checkpoints?: {
+    get(input: { agentId: string; blobId: string }): Promise<Uint8Array | null>;
   };
   dispose?(): Promise<void>;
 }
@@ -60,6 +68,7 @@ export interface CursorLocalAgentDocument {
   status: "idle" | "running" | "error" | "archived";
   activeRunId?: string | null;
   updatedAt: number;
+  latestCheckpoint?: CursorCheckpointRef | null;
   [key: string]: unknown;
 }
 
@@ -69,6 +78,7 @@ export interface CursorLocalAgentRunDocument {
   status: "queued" | "running" | "finished" | "error" | "cancelled" | "expired";
   updatedAt: number;
   endedAt?: number | null;
+  latestCheckpointRef?: CursorCheckpointRef | null;
   [key: string]: unknown;
 }
 
