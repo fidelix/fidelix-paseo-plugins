@@ -24,6 +24,8 @@ const os = require("node:os");
 const { readFileSync, existsSync, readdirSync } = require("node:fs");
 
 let cached = null;
+let cachedSqlite = null;
+let cachedRequire = null;
 
 function dirHasCursorSdk(dir) {
   // Fast path: the SDK is installed (the manifest `build` step runs
@@ -156,12 +158,24 @@ function findAnchor() {
   );
 }
 
-function loadCursorSdk() {
-  if (!cached) {
+function sdkRequire() {
+  if (!cachedRequire) {
     const { createRequire } = require("node:module");
-    cached = createRequire(findAnchor())("@cursor/sdk");
+    cachedRequire = createRequire(findAnchor());
   }
+  return cachedRequire;
+}
+
+function loadCursorSdk() {
+  if (!cached) cached = sdkRequire()("@cursor/sdk");
   return cached;
 }
 
-module.exports = { loadCursorSdk };
+// Separate entry so the sqlite driver (node:sqlite) only loads when a
+// session actually opens a store.
+function loadCursorSdkSqlite() {
+  if (!cachedSqlite) cachedSqlite = sdkRequire()("@cursor/sdk/sqlite");
+  return cachedSqlite;
+}
+
+module.exports = { loadCursorSdk, loadCursorSdkSqlite };

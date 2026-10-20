@@ -2,6 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createCursorProvider } from "./server/provider.js";
 import { createValidateKeyHandler } from "./server/validate.js";
 import { createLoginManager } from "./server/login.js";
+import { closeLocalStores } from "./server/local-store.js";
 import { cursorSettings } from "./shared/settings.js";
 import { cursorLoginStatusRpc, startCursorLoginRpc, validateCursorKeyRpc } from "./shared/validate.js";
 
@@ -14,5 +15,6 @@ export default function contribute(server: PluginServerContext) {
   server.registerProvider(createCursorProvider({ settings }));
   return async () => {
     await login.shutdown();
+    await closeLocalStores();
   };
 }
