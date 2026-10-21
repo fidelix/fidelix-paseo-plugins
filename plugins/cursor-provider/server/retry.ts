@@ -1,5 +1,3 @@
-import type { CursorSdkErrorShape } from "./cursor-sdk-types.js";
-
 /**
  * Retriable-failure classification for Cursor SDK runs.
  *
@@ -14,8 +12,11 @@ import type { CursorSdkErrorShape } from "./cursor-sdk-types.js";
  * - Never retry: auth/config errors (401 bad key, 400/404 bad model or
  *   params), AgentBusyError (409, needs user intervention), cancellations.
  *
- * `resource_exhausted` IS retried: Cursor quota/rate-limit errors are
- * transient capacity signals and resolve once capacity frees. A bare 404
+ * Local run failures can lose their structured code and retain only a
+ * message such as `[resource_exhausted] Error`. Recover known codes from
+ * that exact prefix when there is no explicit code. Resource exhaustion
+ * can mean temporary model capacity; retries are bounded because the code
+ * alone does not identify the exhausted resource. A bare 404
  * (unknown model/deployment, e.g. the ACP "trouble finding the resource you
  * requested" failure) is NOT retried: resending the same model against a
  * missing deployment fails identically. The fix for a 404 is switching
@@ -78,6 +79,15 @@ function readRetryableFlag(error: unknown): boolean | undefined {
   return undefined;
 }
 
+function readMessageCode(message: string): string | undefined {
+  const code = /^\[([a-z][a-z0-9_]*)\](?:\s|$)/i.exec(message)?.[1];
+  if (!code) return undefined;
+  const normalized = code.toLowerCase();
+  return RETRYABLE_CODES.has(normalized) || NON_RETRYABLE_CODES.has(normalized)
+    ? code
+    : undefined;
+}
+
 function readMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (error !== null && typeof error === "object") {
@@ -92,8 +102,7 @@ function readMessage(error: unknown): string {
 
 export function classifyCursorError(error: unknown): ClassifiedError {
   const message = readMessage(error);
-  const raw = readCode(error) ?? (error as CursorSdkErrorShape | null)?.code;
-  const code = typeof raw === "string" && raw.length > 0 ? raw : undefined;
+  const code = readCode(error) ?? readMessageCode(message);
   const normalized = code?.toLowerCase();
   if (normalized && NON_RETRYABLE_CODES.has(normalized)) {
     return { message, code, retryable: false };

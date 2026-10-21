@@ -93,12 +93,45 @@ describe("classifyCursorError", () => {
   });
 
   it("does not retry plain-object run errors without codes", () => {
-    // run.wait() failures arrive as `{ message }` with no code: no retry,
-    // but the message must survive (no "[object Object]").
+    // Unrecognized messages must survive without becoming retryable.
     const out = classifyCursorError({ message: "AI Model Not Found" });
     assert.equal(out.retryable, false);
     assert.equal(out.message, "AI Model Not Found");
     assert.deepEqual(toProviderError({ message: "AI Model Not Found" }), { message: "AI Model Not Found" });
+  });
+
+  it("recovers the code from the observed local run failure", () => {
+    const message = "[resource_exhausted] Error";
+    assert.deepEqual(classifyCursorError({ message }), {
+      message, code: "resource_exhausted", retryable: true,
+    });
+  });
+
+  it("recognizes known prefixes on thrown errors and strings too", () => {
+    for (const error of [new Error("[UNAVAILABLE] Error"), "[timeout] Error"]) {
+      assert.equal(classifyCursorError(error).retryable, true);
+    }
+    assert.equal(classifyCursorError({ code: "", message: "[rate_limited] Error" }).retryable, true);
+  });
+
+  it("preserves non-retryable message codes even when flagged retryable", () => {
+    assert.deepEqual(classifyCursorError({ message: "[not_found] Error", isRetryable: true }), {
+      message: "[not_found] Error", code: "not_found", retryable: false,
+    });
+  });
+
+  it("gives explicit codes precedence over message prefixes", () => {
+    for (const code of ["not_found", "some_future_code"]) {
+      assert.deepEqual(classifyCursorError({ code, message: "[resource_exhausted] Error" }), {
+        message: "[resource_exhausted] Error", code, retryable: false,
+      });
+    }
+  });
+
+  it("does not infer codes from unknown prefixes or incidental mentions", () => {
+    for (const message of ["[some_future_code] Error", "tool output: [resource_exhausted] Error", "[resource_exhausted]suffix"]) {
+      assert.deepEqual(classifyCursorError({ message }), { message, code: undefined, retryable: false });
+    }
   });
 
   it("preserves message and code", () => {

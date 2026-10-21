@@ -89,10 +89,12 @@ reload) is cancelled on the next resume, so the agent does not fail with
   provider-owned child sessions (`restoration: "parent"`). Their text,
   reasoning and tool calls stream into the child through the `send` option
   `onDelta`; `run.stream()` only carries the parent's `task` card.
-- Transient-failure retry: rate-limit / quota (`resource_exhausted`, 429 family) and
-  network (5xx / timeout / unavailable) errors retry up to 3 total attempts with
+- Transient-failure retry: rate-limit / quota, model capacity (`resource_exhausted`,
+  429 family), and network (5xx / timeout / unavailable) errors retry up to 3 total attempts with
   1s → 15s capped exponential backoff and a visible warning notice per retry
-  (`server/retry.ts:103`). Auth/config errors (401/400/404), `agent_busy` (409),
+  (`server/retry.ts`). Known codes are also recovered from message prefixes such
+  as `[resource_exhausted]` when the SDK omits the structured code.
+  Auth/config errors (401/400/404), `agent_busy` (409),
   and cancellations never retry.
 - Conversation revert (`session.revert.conversation`) and archive/unarchive — with
   the limits below.
