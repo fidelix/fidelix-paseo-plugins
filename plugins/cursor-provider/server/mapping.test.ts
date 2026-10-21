@@ -13,6 +13,12 @@ import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDele
 
 const IDS = { itemId: "item:1" };
 
+/** Composer-only fields (icon, option isDefault) the plugin setting type omits. */
+function extra(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  return (value as Record<string, unknown>)[key];
+}
+
 function usage(overrides: Partial<CursorTokenUsage> = {}): CursorTokenUsage {
   return {
     inputTokens: 10,
@@ -449,8 +455,14 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
     assert.equal(config.settings[0]?.id, "auto_accept");
     assert.equal(config.settings[0]?.type, "toggle");
     assert.equal(config.settings[0]?.label, "Auto Accept");
+    assert.equal(extra(config.settings[0], "icon"), "shield-check");
     assert.equal(config.settings[1]?.id, "fast");
     assert.equal(config.settings[1]?.type, "select");
+    assert.equal(extra(config.settings[1], "icon"), "zap");
+    // Unset follows the default variant (fast=true for this fixture) and shows it.
+    assert.equal(config.settings[1] && "value" in config.settings[1] ? config.settings[1].value : undefined, "true");
+    const options = extra(config.settings[1], "options");
+    assert.equal(Array.isArray(options) && extra(options[0], "isDefault"), true);
     assert.equal(config.thinkingOption, "high");
     assert.deepEqual(
       config.thinkingOptions.map((option) => option.id),
@@ -552,6 +564,29 @@ describe("thinking params / fast select wiring", () => {
         { id: "fast", value: "true" },
       ],
     });
+  });
+
+  it("shows the default fast variant when the select is unset, and an explicit value over it", () => {
+    const raw = [opus()];
+    const models = toProviderModels(raw);
+    const unset = publishableConfig({
+      model: "claude-opus-5-5",
+      settings: {},
+      models,
+      rawModels: raw,
+      thinkingSelections: {},
+    });
+    const fast = unset.settings.find((setting) => setting.id === "fast");
+    assert.equal(fast && "value" in fast ? fast.value : undefined, "false");
+    const forced = publishableConfig({
+      model: "claude-opus-5-5",
+      settings: { fast: "true" },
+      models,
+      rawModels: raw,
+      thinkingSelections: {},
+    });
+    const forcedFast = forced.settings.find((setting) => setting.id === "fast");
+    assert.equal(forcedFast && "value" in forcedFast ? forcedFast.value : undefined, "true");
   });
 
   it("sends a bare model id when thinking and fast are unset", () => {

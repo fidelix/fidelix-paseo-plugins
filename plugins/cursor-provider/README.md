@@ -74,8 +74,9 @@ reload) is cancelled on the next resume, so the agent does not fail with
 - Per-model reasoning effort: the thinking dropdown lists the model's effort
   values (`low`/`medium`/`high`/`xhigh`/`max`, `reasoning` variants, or `On`/`Off`
   for older `thinking` models), defaulting to the model's default variant.
-- Fast select (`Off`/`Fast`) on models that expose a `fast` parameter; hidden
-  otherwise. Unset follows the model's default variant.
+- Fast select (`Off`/`Fast`, lightning icon) on models that expose a `fast`
+  parameter; hidden otherwise. Unset follows the model's default variant and
+  the control shows that default. Auto Accept is a separate shield toggle.
 - MCP servers (stdio + http/sse) passed through to the SDK.
 - Session persistence / listing / configure; usage reporting
   (input, cached-input, output tokens).
@@ -119,17 +120,19 @@ reload) is cancelled on the next resume, so the agent does not fail with
 - **Local runs auto-approve tools.** The SDK headless runtime executes tool calls
   without interactive approval. `session.permission` `deny` only cancels the active
   run; `question`-type input requests are surfaced as a `cursor-input` prompt.
-  The composer's **Auto Accept** toggle (`auto_accept`, same id/icon as OpenCode)
-  maps to the SDK `autoReview` create flag: classifier-backed Auto mode when the
-  backend has the classifier feature enabled, full-allow headless execution
-  otherwise. Pre-rename sessions stored the toggle under `autoReview`; the first
-  configure migrates the value forward.
+  The composer's **Auto Accept** toggle (`auto_accept`, `shield-check` icon,
+  same as OpenCode) maps to the SDK `autoReview` create flag: classifier-backed
+  Auto mode when the backend has the classifier feature enabled, full-allow
+  headless execution otherwise. Pre-rename sessions stored the toggle under
+  `autoReview`; the first configure migrates the value forward.
 - **Reasoning effort is a value dropdown, fast is a select.** Thinking options
   are the model's effort-param *values* (e.g. `low`…`max`), never parameter
   ids (`effort`, `context`) or other models' values — switching models re-keys
   to the new model's default. `context` (window size) always follows the
-  default variant; `fast` is a separate `Off`/`Fast` select shown only on
-  models that expose it, and unset follows the default variant.
+  default variant. `fast` is a separate `Off`/`Fast` select (`zap` icon) shown
+  only on models that expose it. Unset is not sent, so the backend default
+  applies, and the select displays that default (`Off` is the inactive option
+  so only an explicit Fast highlights).
 - **Context window usage is the checkpoint's `token_details`.** Cursor's public
   run usage is a billed sum across every model call, so it is wrong after
   compaction. The saved conversation checkpoint carries `used_tokens` and

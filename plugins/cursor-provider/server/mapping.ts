@@ -93,10 +93,11 @@ export const CURSOR_SETTING_AUTO_ACCEPT = "auto_accept";
 /** Legacy storage key for the auto-accept toggle (pre-rename). */
 export const CURSOR_SETTING_AUTO_REVIEW = "autoReview";
 /**
- * Fast mode for models that expose a `fast` parameter. Rendered as a select
- * (Off/Fast) — not a toggle — because plugin settings carry no icon and two
- * toggles render as two identical gear buttons. Mirrors the built-in `cursor`
- * ACP provider, where fast is also a select.
+ * Fast mode for models that expose a `fast` parameter. A select (Off/Fast),
+ * same shape as the built-in Cursor ACP provider. The composer only swaps
+ * the gear for a real icon when the setting carries one: `zap` here,
+ * `shield-check` on auto-accept. Unset follows the model's default variant
+ * and is displayed as that variant so the control is not blank.
  */
 export const CURSOR_SETTING_FAST = "fast";
 
@@ -173,6 +174,21 @@ export function fastSelectValue(value: unknown): string | null {
   if (state === true) return CURSOR_FAST_ON;
   if (state === false) return CURSOR_FAST_OFF;
   return null;
+}
+
+/**
+ * What the Fast select shows. An explicit Off/Fast wins; otherwise the
+ * model's default variant, so an unset control still reads Off or Fast
+ * instead of a blank that looks like the other button.
+ */
+export function displayedFastSelectValue(
+  settings: Record<string, unknown>,
+  raw: CursorModelListItem | undefined,
+): string | null {
+  const explicit = fastSelectValue(settings[CURSOR_SETTING_FAST]);
+  if (explicit !== null) return explicit;
+  const fallback = raw ? defaultVariantParamMap(raw).get("fast") : undefined;
+  return fastSelectValue(fallback);
 }
 
 function fastParamValue(param: CursorModelParameter, enabled: boolean): string | undefined {
@@ -502,29 +518,37 @@ function sessionSettings(
   modelId: string | undefined,
   rawModels: CursorModelListItem[] | undefined,
 ): ProviderConfigState["settings"] {
-  const out: Array<ProviderConfigState["settings"][number]> = [
+  // The plugin setting type has no icon, but the daemon copies the object
+  // through (`{ ...setting }`). shield-check and zap are the composer names
+  // (green shield vs lightning). Without them both controls render as gears.
+  const model = findRawModel(rawModels, modelId);
+  const out: Array<Record<string, unknown>> = [
     {
       type: "toggle",
       id: CURSOR_SETTING_AUTO_ACCEPT,
       label: "Auto Accept",
       description: "Automatically approves Cursor tool calls without asking.",
+      tooltip: "Auto accept permission prompts",
+      icon: "shield-check",
       value: isAutoAcceptEnabled(settings),
     },
   ];
-  if (fastParamForModel(findRawModel(rawModels, modelId))) {
+  if (fastParamForModel(model)) {
     out.push({
       type: "select",
       id: CURSOR_SETTING_FAST,
       label: "Fast",
-      description: "Fast mode for models that expose a fast parameter",
-      value: fastSelectValue(settings[CURSOR_SETTING_FAST]),
+      description: "Cursor fast mode",
+      tooltip: "Select Cursor fast mode",
+      icon: "zap",
+      value: displayedFastSelectValue(settings, model),
       options: [
-        { label: "Off", value: CURSOR_FAST_OFF },
+        { label: "Off", value: CURSOR_FAST_OFF, isDefault: true },
         { label: "Fast", value: CURSOR_FAST_ON },
       ],
     });
   }
-  return out;
+  return out as unknown as ProviderConfigState["settings"];
 }
 
 /**
