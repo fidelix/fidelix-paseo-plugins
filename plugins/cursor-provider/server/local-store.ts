@@ -6,6 +6,7 @@
 // and rewrites a whole NDJSON file on every operation, and with every agent
 // sharing one store the plugin process ran out of heap within minutes.
 import { createHash } from "node:crypto";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { loadCursorSdkSqlite } from "./cursor-sdk-loader.js";
 import type {
@@ -26,6 +27,37 @@ const openStores = new Map<string, Promise<CursorLocalAgentStore>>();
 export function sqliteStateRoot(root: string, cwd: string): string {
   const digest = createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 32);
   return path.join(root, "sqlite", digest);
+}
+
+/**
+ * `Agent.messages.list` materializes every turn blob before it slices.
+ * Agent stores on this machine reach hundreds of MB (tens of thousands of
+ * blobs). Doing that on session open, while other turns are live, exhausts
+ * the plugin heap inside the SDK executor and kills every session.
+ * Skip replay above this size; the daemon already has the timeline.
+ */
+export const HISTORY_REPLAY_MAX_STORE_BYTES = 32 * 1024 * 1024;
+
+/** `<stateRoot>/agents/agent-<sha256(agentId)>/store.db`, matching the SDK. */
+export function agentStoreDbPath(root: string, cwd: string, agentId: string): string {
+  const digest = createHash("sha256").update(agentId).digest("hex");
+  return path.join(sqliteStateRoot(root, cwd), "agents", `agent-${digest}`, "store.db");
+}
+
+export function replayAllowedForStoreBytes(bytes: number | null): boolean {
+  if (bytes === null) return true;
+  return bytes <= HISTORY_REPLAY_MAX_STORE_BYTES;
+}
+
+/** True when history replay will not pull an oversized blob database into the heap. */
+export async function historyReplayAllowed(root: string, cwd: string, agentId: string): Promise<boolean> {
+  if (agentId.length === 0) return false;
+  try {
+    const info = await stat(agentStoreDbPath(root, cwd, agentId));
+    return replayAllowedForStoreBytes(info.size);
+  } catch {
+    return true;
+  }
 }
 
 export function openLocalStore(root: string, cwd: string): Promise<CursorLocalAgentStore> {

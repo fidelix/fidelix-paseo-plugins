@@ -18,7 +18,20 @@ export type CursorPluginSettings = PluginSettings<(typeof cursorSettings)["schem
 import { z } from "zod";
 import { loadCursorSdk } from "./cursor-sdk-loader.js";
 import type { CursorLocalAgentStore } from "./cursor-sdk-loader.js";
-import { openLocalStore, settleOrphanedRun, sqliteStateRoot } from "./local-store.js";
+import {
+  agentStoreDbPath,
+  HISTORY_REPLAY_MAX_STORE_BYTES,
+  historyReplayAllowed,
+  openLocalStore,
+  settleOrphanedRun,
+  sqliteStateRoot,
+} from "./local-store.js";
+import {
+  beginTurnDiagnostics,
+  describeError,
+  type TurnDiagnostics,
+  type TurnOutcome,
+} from "./diagnostics.js";
 import type {
   CursorAgent,
   CursorAgentUsage,
@@ -28,11 +41,14 @@ import type {
   CursorSDKMessage,
   CursorTaskUpdate,
 } from "./cursor-sdk-types.js";
-import type {
-  ProviderCommand,
-  ProviderTimelineItem,
-  ProviderUsage,
-} from "@getpaseo/plugin/server/provider";
+import type { ProviderTimelineItem, ProviderUsage } from "@getpaseo/plugin/server/provider";
+import {
+  discoverCursorSlashCatalog,
+  fallbackSlashCatalog,
+  renderSlashPrompt,
+  toProviderCommands,
+  type CursorSlashEntry,
+} from "./cursor-commands.js";
 import {
   applySettings,
   CURSOR_SETTING_AUTO_ACCEPT,
@@ -129,6 +145,10 @@ interface SessionState {
   taskChildren: Map<string, string>;
   /** Subagent updates that arrived before their `task` tool call opened the child. */
   pendingTaskUpdates: Map<string, CursorTaskUpdate[]>;
+  /** Slash skills and commands discovered for this session's cwd. */
+  slashCatalog: Map<string, CursorSlashEntry>;
+  /** Diagnostics for the active turn; cancel paths note their reason here. */
+  turnDiag: TurnDiagnostics | null;
 }
 
 interface ChildState {
@@ -192,14 +212,28 @@ async function openStore(config: Pick<ProviderSessionConfig, "env" | "cwd">): Pr
   }
 }
 
-function promptText(prompt: ProviderPrompt): {
+/** SQLite files sized in the diagnostics record of a turn that ends badly. */
+function diagnosticStoreFiles(state: SessionState): Record<string, string> | undefined {
+  const agentId = state.agent?.agentId;
+  if (!agentId) return undefined;
+  const root = storeRoot(state.config);
+  return {
+    agentStore: agentStoreDbPath(root, state.config.cwd, agentId),
+    index: path.join(sqliteStateRoot(root, state.config.cwd), "index.db"),
+  };
+}
+
+function promptText(
+  prompt: ProviderPrompt,
+  catalog: Map<string, CursorSlashEntry>,
+): {
   text: string;
   images: Array<{ data: string; mimeType: string }>;
 } {
   if (prompt.input.type === "command") {
-    const text = commandPromptText(prompt.input);
-    if (text === null) throw new Error(`Unknown Cursor command: ${prompt.input.name}`);
-    return { text, images: [] };
+    const entry = catalog.get(prompt.input.name);
+    if (!entry) throw new Error(`Unknown Cursor command: ${prompt.input.name}`);
+    return { text: renderSlashPrompt(entry, prompt.input.arguments), images: [] };
   }
   const text: string[] = [];
   const images: Array<{ data: string; mimeType: string }> = [];
@@ -216,7 +250,7 @@ function promptLabel(prompt: ProviderPrompt): string {
     const args = prompt.input.arguments.trim();
     return args ? `/${prompt.input.name} ${args}` : `/${prompt.input.name}`;
   }
-  return promptText(prompt).text;
+  return promptText(prompt, new Map()).text;
 }
 
 export function createCursorProvider(options: ProviderOptions = {}): {
@@ -346,9 +380,10 @@ function createConnection(
    * the daemon's 2s interrupt budget and surface as "cancellation was not
    * acknowledged".
    */
-  function cancelActiveTurn(state: SessionState, emitCanceled: boolean): void {
+  function cancelActiveTurn(state: SessionState, emitCanceled: boolean, reason: string): void {
     const turnId = state.activeTurnId;
     const run = state.activeRun;
+    if (turnId) state.turnDiag?.note("cancel", { reason, hadRun: run !== null });
     state.activeTurnId = null;
     state.activeRun = null;
     state.turnAbort?.abort();
@@ -668,6 +703,8 @@ function createConnection(
           userMessageIds: [],
           taskChildren: new Map(),
           pendingTaskUpdates: new Map(),
+          slashCatalog: new Map(),
+          turnDiag: null,
         };
         sessions.set(input.sessionId, state);
         try {
@@ -697,7 +734,7 @@ function createConnection(
         return;
       }
       case "session.interrupt": {
-        cancelActiveTurn(session(input.sessionId), true);
+        cancelActiveTurn(session(input.sessionId), true, "interrupt");
         emit({ type: "request.completed", requestId: input.requestId });
         return;
       }
@@ -707,11 +744,15 @@ function createConnection(
           throw new Error(`Unknown Cursor permission: ${input.permissionId}`);
         }
         permissions.delete(input.permissionId);
+        sessions.get(input.sessionId)?.turnDiag?.note("cursor_input_response", {
+          requestId: pendingPermission.requestId,
+          behavior: input.response.behavior,
+        });
         // The Cursor SDK local runtime runs headless: tool calls execute
         // without interactive approval. Deny interrupts the active run.
         if (input.response.behavior === "deny") {
           const state = sessions.get(input.sessionId);
-          if (state) cancelActiveTurn(state, true);
+          if (state) cancelActiveTurn(state, true, "permission_deny");
         }
         emit({
           type: "session.permission_resolved",
@@ -734,7 +775,7 @@ function createConnection(
           state.closed = true;
           sessions.delete(input.sessionId);
           forgetPermissions(input.sessionId);
-          cancelActiveTurn(state, false);
+          cancelActiveTurn(state, false, "session_close");
           // Closing the SDK agent can wait on the runtime; the daemon only
           // needs the session gone, so finish teardown in the background.
           void closeAgent(state).catch(() => undefined);
@@ -818,18 +859,14 @@ function createConnection(
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
             ...(usesPaseoDelegation(config) ? { disallowedTools: ["task"] } : {}),
-            local: { cwd: config.cwd, store },
+            local: cursorLocalOptions(config, store),
           })
         : await Agent.create({
             ...(apiKey ? { apiKey } : {}),
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
             ...(usesPaseoDelegation(config) ? { disallowedTools: ["task"] } : {}),
-            local: {
-              cwd: config.cwd,
-              store,
-              autoReview: isAutoAcceptEnabled(state.settings),
-            },
+            local: cursorLocalOptions(config, store, isAutoAcceptEnabled(state.settings)),
             ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
             mcpServers: toMcpServers(config),
           })
@@ -856,10 +893,20 @@ function createConnection(
       sessionId: state.id,
       config: publishableConfig(currentConfig(state)),
     });
+    let slashEntries: CursorSlashEntry[];
+    try {
+      slashEntries = await discoverCursorSlashCatalog(config.cwd);
+    } catch (error) {
+      console.error(
+        `cursor-sdk provider: slash catalog scan failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      slashEntries = fallbackSlashCatalog();
+    }
+    state.slashCatalog = new Map(slashEntries.map((entry) => [entry.name, entry]));
     emit({
       type: "session.commands",
       sessionId: state.id,
-      commands: [...BUILTIN_COMMANDS],
+      commands: toProviderCommands(slashEntries),
     });
     if (persistence && persistedAgentId) {
       await replayHistory(state, agent, config);
@@ -966,7 +1013,7 @@ function createConnection(
   async function runPrompt(state: SessionState, prompt: ProviderPrompt): Promise<void> {
     if (!state.agent) throw new Error("Cursor session is not open");
     adoptCatalog(state);
-    if (prompt.input.type === "command" && commandPromptText(prompt.input) === null) {
+    if (prompt.input.type === "command" && !state.slashCatalog.has(prompt.input.name)) {
       emit({
         type: "session.prompt_result",
         sessionId: state.id,
@@ -977,7 +1024,7 @@ function createConnection(
     }
     if (state.activeTurnId) {
       if (prompt.delivery === "steer") {
-        const outcome = await state.activeRun?.steer?.(promptText(prompt).text).catch(
+        const outcome = await state.activeRun?.steer?.(promptText(prompt, state.slashCatalog).text).catch(
           () => undefined,
         );
         if (outcome === "complete_delivered" && state.activeTurnId) {
@@ -1001,7 +1048,7 @@ function createConnection(
       });
       return;
     }
-    const { text, images } = promptText(prompt);
+    const { text, images } = promptText(prompt, state.slashCatalog);
     const turnId = newId("turn");
     const turnAbort = new AbortController();
     state.activeTurnId = turnId;
@@ -1021,17 +1068,30 @@ function createConnection(
       item: {
         type: "user_message",
         id: messageId,
-        text,
+        text: prompt.input.type === "command" ? promptLabel(prompt) : text,
         clientMessageId: prompt.clientMessageId,
         revertToken: { messageId },
       },
     });
     state.userMessageIds.push(messageId);
+    const turnDiag = beginTurnDiagnostics({
+      sessionId: state.id,
+      turnId,
+      agentId: state.agent?.agentId,
+      model: state.model,
+      storeFiles: diagnosticStoreFiles(state),
+    });
+    state.turnDiag = turnDiag;
+    let outcome: TurnOutcome = { status: "canceled" };
     try {
-      const result = await sendWithRetry(state, text, images, turnId, turnAbort.signal);
+      const result = await sendWithRetry(state, text, images, turnId, turnAbort.signal, turnDiag);
+      if (result.status === "error") outcome = { status: "failed", error: result.error };
       // An interrupt already settled this turn (cleared activeTurnId and
       // emitted `canceled`); never overwrite a newer turn's state.
-      if (state.activeTurnId !== turnId) return;
+      if (state.activeTurnId !== turnId) {
+        outcome = { ...outcome, status: "canceled" };
+        return;
+      }
       state.activeTurnId = null;
       state.activeRun = null;
       state.turnAbort = null;
@@ -1049,8 +1109,11 @@ function createConnection(
         });
         return;
       }
+      outcome = { status: "completed" };
       emit({ type: "session.turn", sessionId: state.id, turnId, state: "completed" });
     } catch (error) {
+      const failure = toProviderError(error);
+      outcome = { status: state.activeTurnId === turnId ? "failed" : "canceled", error: failure };
       if (state.activeTurnId !== turnId) return;
       state.activeTurnId = null;
       state.activeRun = null;
@@ -1060,8 +1123,11 @@ function createConnection(
         sessionId: state.id,
         turnId,
         state: "failed",
-        error: toProviderError(error),
+        error: failure,
       });
+    } finally {
+      if (state.turnDiag === turnDiag) state.turnDiag = null;
+      turnDiag.end(outcome);
     }
   }
 
@@ -1086,6 +1152,7 @@ function createConnection(
     images: Array<{ data: string; mimeType: string }>,
     turnId: string,
     signal: AbortSignal,
+    turnDiag: TurnDiagnostics,
   ): Promise<
     { status: "finished" | "cancelled" } | { status: "error"; error: { message: string; code?: string } }
   > {
@@ -1093,6 +1160,8 @@ function createConnection(
     for (;;) {
       if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
       attempt += 1;
+      turnDiag.attempt(attempt);
+      const delivery = { usage: false };
       try {
         await waitForPriorCancel(state);
         if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
@@ -1100,7 +1169,10 @@ function createConnection(
           model: resolveModelSelection(state),
           mode: toAgentMode(state.config.mode),
           mcpServers: toMcpServers(state.config),
-          onDelta: ({ update }) => acceptDelta(state, turnId, update),
+          onDelta: ({ update }) => {
+            turnDiag.delta(update.type);
+            acceptDelta(state, turnId, update);
+          },
         }) as Promise<CursorRun>;
         state.sendPending = sending;
         let run: CursorRun;
@@ -1109,6 +1181,7 @@ function createConnection(
         } finally {
           if (state.sendPending === sending) state.sendPending = null;
         }
+        turnDiag.run(run);
         // Interrupted while `send` was in flight: the turn is already settled
         // for the daemon, so cancel this run without adopting it.
         if (state.activeTurnId !== turnId || signal.aborted || state.closed) {
@@ -1116,8 +1189,16 @@ function createConnection(
           return { status: "cancelled" };
         }
         state.activeRun = run;
-        await drainRun(state, run, turnId);
+        await drainRun(state, run, turnId, delivery, turnDiag);
         const result = await run.wait();
+        if (result.status !== "finished") {
+          turnDiag.note("run_result", {
+            attempt,
+            runId: run.id,
+            status: result.status,
+            ...(result.error ? { error: result.error.message, code: result.error.code } : {}),
+          });
+        }
         if (state.activeTurnId !== turnId) return { status: "cancelled" };
         emitTurnUsage(state, turnId, {
           ...toUsageWithCost(result.usage, await readTurnCostUsd(state)),
@@ -1126,6 +1207,12 @@ function createConnection(
         if (state.activeTurnId !== turnId) return { status: "cancelled" };
         if (result.status === "finished") return { status: "finished" };
         if (result.status === "cancelled") return { status: "cancelled" };
+        // The answer already arrived (`usage` is the SDK's turnEnded). A
+        // following error is the checkpoint/resume race, not a missing reply.
+        if (delivery.usage) {
+          turnDiag.note("error_after_answer", { attempt, error: result.error?.message, code: result.error?.code });
+          return { status: "finished" };
+        }
         const classified = classifyCursorError(
           result.error
             ? { message: result.error.message, code: result.error.code }
@@ -1133,6 +1220,7 @@ function createConnection(
         );
         if (classified.retryable && attempt < retry.maxAttempts) {
           state.activeRun = null;
+          turnDiag.note("plugin_retry", { attempt, error: classified.message, code: classified.code });
           emitRetryNotice(state, turnId, attempt, classified.message);
           try {
             await sleep(retryDelayMs(attempt, retry), signal);
@@ -1144,9 +1232,15 @@ function createConnection(
         }
         return { status: "error", error: { message: classified.message, code: classified.code } };
       } catch (error) {
+        turnDiag.note("send_threw", { attempt, error: describeError(error) });
         if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
+        if (delivery.usage) {
+          turnDiag.note("error_after_answer", { attempt, error: describeError(error) });
+          return { status: "finished" };
+        }
         const classified = classifyCursorError(error);
         if (classified.retryable && attempt < retry.maxAttempts) {
+          turnDiag.note("plugin_retry", { attempt, error: classified.message, code: classified.code });
           emitRetryNotice(state, turnId, attempt, classified.message);
           try {
             await sleep(retryDelayMs(attempt, retry), signal);
@@ -1243,12 +1337,29 @@ function createConnection(
     emit({ type: "session.usage", sessionId: state.id, turnId, usage });
   }
 
-  async function drainRun(state: SessionState, run: CursorRun, turnId: string): Promise<void> {
+  async function drainRun(
+    state: SessionState,
+    run: CursorRun,
+    turnId: string,
+    delivery: { usage: boolean },
+    turnDiag: TurnDiagnostics,
+  ): Promise<void> {
     let assistantText = "";
     let assistantId: string | null = null;
     const toolItems = new Map<string, string>();
     for await (const event of run.stream()) {
+      turnDiag.event(event);
       if (state.closed || state.activeTurnId !== turnId) break;
+      if (event.type === "usage") {
+        delivery.usage = true;
+        emit({ type: "session.usage", sessionId: state.id, turnId, usage: toUsage(event.usage) });
+        continue;
+      }
+      // `usage` is turnEnded. Anything the SDK streams after that is a resume
+      // rewriting the answer that already finished; appending it is the repeat.
+      if (delivery.usage && (event.type === "assistant" || event.type === "thinking" || event.type === "status")) {
+        continue;
+      }
       if (event.type === "assistant") {
         const text = event.message.content
           .filter((block) => block.type === "text")
@@ -1267,10 +1378,6 @@ function createConnection(
             text: assistantText,
           },
         });
-        continue;
-      }
-      if (event.type === "usage") {
-        emit({ type: "session.usage", sessionId: state.id, turnId, usage: toUsage(event.usage) });
         continue;
       }
       if (event.type === "request") {
@@ -1508,10 +1615,18 @@ function createConnection(
     config: ProviderSessionConfig,
   ): Promise<void> {
     void agent;
+    const agentId = state.agent?.agentId;
+    if (!agentId) return;
     try {
+      if (!(await historyReplayAllowed(storeRoot(config), config.cwd, agentId))) {
+        console.error(
+          `cursor-sdk provider: skipped history replay for ${agentId}; agent store is larger than ${HISTORY_REPLAY_MAX_STORE_BYTES} bytes`,
+        );
+        return;
+      }
       const { Agent } = loadCursorSdk();
       const store = await openStore(config);
-      const messages = (await Agent.messages.list(state.agent?.agentId ?? "", {
+      const messages = (await Agent.messages.list(agentId, {
         runtime: "local",
         cwd: config.cwd,
         store,
@@ -1667,7 +1782,7 @@ function createConnection(
         emit({ type: "session.closed", sessionId: childId });
       }
     }
-    cancelActiveTurn(state, false);
+    cancelActiveTurn(state, false, "revert");
     await waitForPriorCancel(state);
     await closeAgent(state);
     // Re-create the native agent so the next prompt resumes cleanly; the
@@ -1683,11 +1798,7 @@ function createConnection(
       model: resolveModelSelection(state),
       ...(tools ? { tools } : {}),
       ...(usesPaseoDelegation(state.config) ? { disallowedTools: ["task"] } : {}),
-      local: {
-        cwd: state.config.cwd,
-        store,
-        autoReview: isAutoAcceptEnabled(state.settings),
-      },
+      local: cursorLocalOptions(state.config, store, isAutoAcceptEnabled(state.settings)),
       ...(state.config.systemPrompt ? { systemPrompt: state.config.systemPrompt } : {}),
       mcpServers: toMcpServers(state.config),
     })) as CursorAgent;
@@ -1727,7 +1838,7 @@ function createConnection(
     for (const [sessionId, state] of [...sessions.entries()]) {
       if (state.agent?.agentId !== agentId) continue;
       state.closed = true;
-      cancelActiveTurn(state, false);
+      cancelActiveTurn(state, false, "archive");
       await closeAgent(state).catch(() => undefined);
       sessions.delete(sessionId);
       forgetPermissions(sessionId);
@@ -1767,7 +1878,7 @@ function createConnection(
       // stalled backend.
       for (const state of sessions.values()) {
         state.closed = true;
-        cancelActiveTurn(state, false);
+        cancelActiveTurn(state, false, "connection_close");
       }
       for (const childId of [...children.keys()]) {
         children.delete(childId);
@@ -1789,35 +1900,27 @@ function createConnection(
 const CATALOG_RETRY_MS = 30_000;
 
 /**
- * Slash commands published via session.commands. The SDK has no command
- * listing, so these mirror cursor-agent's built-in skills plus compact and
- * review helpers. Command prompts are executed as normal turns.
+ * With `settingSources` omitted the SDK loads no project, user, or plugin
+ * rules/skills. cursor-agent always passes them; this provider does too.
  */
-const BUILTIN_COMMANDS: ReadonlyArray<ProviderCommand> = [
-  { name: "plan", description: "Explore and propose a plan without making edits", argumentHint: "[goal]" },
-  { name: "compact", description: "Summarize this conversation so far", argumentHint: "" },
-  { name: "review", description: "Review the current uncommitted changes", argumentHint: "" },
-  { name: "commit", description: "Commit staged changes with a generated message", argumentHint: "[hint]" },
-];
+const CURSOR_SETTING_SOURCES = ["project", "user", "plugins"] as const;
 
-function commandPromptText(input: { name: string; arguments: string }): string | null {
-  const args = input.arguments.trim();
-  switch (input.name) {
-    case "plan":
-      return args
-        ? `Explore the codebase and propose a concrete implementation plan for the following goal. Do not make any edits, only research and plan:\n\n${args}`
-        : "Explore the current state of the codebase and propose what to work on next. Do not make any edits, only research and plan.";
-    case "compact":
-      return "Summarize this conversation so far: what was asked, what was done, what changed on disk, and what is still pending. Keep it concise.";
-    case "review":
-      return "Review the current uncommitted changes (git status and git diff). Report what changed, likely risks, and anything that looks wrong. Do not commit.";
-    case "commit":
-      return args
-        ? `Commit the staged changes with a clear message incorporating this hint: ${args}. Show the resulting commit hash.`
-        : "Commit the staged changes with a clear generated message and show the resulting commit hash.";
-    default:
-      return null;
-  }
+function cursorLocalOptions(
+  config: Pick<ProviderSessionConfig, "cwd">,
+  store: CursorLocalAgentStore,
+  autoReview?: boolean,
+): {
+  cwd: string;
+  store: CursorLocalAgentStore;
+  settingSources: Array<(typeof CURSOR_SETTING_SOURCES)[number]>;
+  autoReview?: boolean;
+} {
+  return {
+    cwd: config.cwd,
+    store,
+    settingSources: [...CURSOR_SETTING_SOURCES],
+    ...(autoReview === undefined ? {} : { autoReview }),
+  };
 }
 
 /**

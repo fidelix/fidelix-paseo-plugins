@@ -63,11 +63,64 @@ A run the store still marks active after the plugin process died (crash,
 reload) is cancelled on the next resume, so the agent does not fail with
 `Agent … already has active run`.
 
+### 4. Diagnostics
+
+The SDK discards its own retry logging for local runs, and `run.wait()` keeps only
+`{message, code}`. `server/diagnostics.ts` records the rest from outside the SDK:
+
+- **SDK spans.** It registers a tracer on the OpenTelemetry global, which the SDK's
+  bundled API reads. That captures every internal attempt (`agent.request.attempt`),
+  each RPC failure with its full error chain (`rpc.run`), and the transcript rewrites
+  (`writeFromState`, `hydrate*`).
+- **HTTP/2.** It wraps `http2.connect`, so every Cursor stream is recorded: reset code,
+  who closed it, time since the last byte, GOAWAY frames, and ping timeouts.
+- **`node:sqlite`.** It times statements, because every store write is synchronous on
+  the plugin's main thread.
+- **Event-loop stalls and GC pauses.** Each stall records the SQLite time, spans, and
+  GC that overlapped it.
+
+Records go to `~/.cursor/sdk/paseo-plugin/diagnostics/cursor-diag-YYYY-MM-DD.jsonl`
+(local date), one JSON object per line, with a 64 MB cap per day and 14 days of
+retention. Change the directory with `CURSOR_PROVIDER_DIAGNOSTICS_DIR`, or turn
+diagnostics off with `CURSOR_PROVIDER_DIAGNOSTICS=0`. Failed or flagged turns, and
+transport trouble, also print one `cursor-sdk diag:` line to the daemon log. Prompts,
+output, and headers other than request ids are never recorded.
+
+Each turn writes one `kind: "turn"` record. Its main fields:
+
+- `flags`: `no_progress`, `multiple_turn_ended` (the SDK resumed after the answer),
+  `error_after_answer`, `sdk_retry`, `plugin_retry`, `stream_reset_by_peer`,
+  `stream_lost_with_session`, `stream_cancelled_by_client`, `http2_goaway`,
+  `http2_session_error`, `loop_stall_1s`/`loop_stall_5s`, `sdk_span_errors`, and
+  `cancel:<reason>`.
+- `attempts`: one entry per SDK HTTP/2 attempt, joined by `x-original-request-id`.
+- `sdk.timeline`: the attempt, RPC, and slow spans, with errors.
+- `process`: process-wide context, shared with other agents, so not proof of cause.
+- `storeBytes`: store sizes, only on turns that ended badly.
+
+Other kinds: `loop_stall`, `sqlite_slow`, `http2_goaway`, `http2_session_error`,
+`http2_ping_failed`, `http2_slow_ping`, `http2_session_close`, `http2_stream`
+(abnormal non-agent streams), and `process`, a 5-minute heartbeat with memory, GC,
+top SQL, and top spans.
+
+```sh
+D=~/.cursor/sdk/paseo-plugin/diagnostics
+# Bad turns today
+jq -c 'select(.kind=="turn" and (.status=="failed" or (.flags|length>0))) | {ts,agentId,status,flags,error,sdkAttempts}' $D/cursor-diag-$(date +%F).jsonl
+# How each attempt of one turn ended
+jq -c 'select(.turnId=="turn-…") | .attempts[] | {startMs,ms,rst,closedBy,silentMs,error}' $D/*.jsonl
+# Worst main-thread stalls
+jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sqliteMs,gcMs,slowestSql,spansEnded}' $D/*.jsonl
+```
+
 ## What works
 
 - Text and image prompts (`prompt.message`, `prompt.image`).
 - Mid-turn steering (`prompt.steer`, via `run.steer`).
-- Slash commands (`prompt.command`): `/plan`, `/compact`, `/review`, `/commit`.
+- Slash commands (`prompt.command`): Cursor skills and command files from the
+  session cwd and the home directory (`.cursor`, `.claude`, `.codex`, `.grok`,
+  `.agents`, plus installed `~/.cursor/plugins`), with `/plan`, `/compact`,
+  `/review`, and `/commit` filling any names that are not already taken.
 - `agent` / `plan` modes, switchable mid-session; model switch applies on next prompt.
 - Live model catalog via `Cursor.models.list` (single `composer-2.5` fallback when
   keyless or the list call fails).
@@ -114,9 +167,14 @@ reload) is cancelled on the next resume, so the agent does not fail with
   unused** — nothing is ever deleted server-side by this provider.
 - **Node `>=22.13`** is required by `@cursor/sdk`, even though the daemon compiles
   the server bundle for an older Node target.
-- **Static 4-command ceiling.** The SDK exposes no command listing, so only
-  `/plan`, `/compact`, `/review`, `/commit` exist (`server/provider.ts:1081`).
-  Custom Cursor skills / space commands are not surfaced.
+- **Slash menu is the on-disk catalog, not Cursor's cloud commands.** The SDK
+  exposes no command listing. The provider scans the same local skill and
+  command files cursor-agent does (`server/cursor-commands.ts`) and publishes
+  them on `session.commands`. Team/dashboard commands are not included. Paseo
+  shows that list when `/` is the first character of the composer. A `/` typed
+  later in the draft only lists entries the daemon tagged `kind: "skill"`, and
+  the plugin bridge currently tags every plugin command as `kind: "command"`,
+  so inline `/` stays empty until Paseo passes that kind through.
 - **Local runs auto-approve tools.** The SDK headless runtime executes tool calls
   without interactive approval. `session.permission` `deny` only cancels the active
   run; `question`-type input requests are surfaced as a `cursor-input` prompt.
@@ -161,7 +219,7 @@ The built-in provider shells out to `cursor-agent acp`
 | Session persistence / listing | Yes | Yes (local SQLite store) | Works |
 | Model catalog | Live, per-model `thought_level` thinking options | Live list, per-model effort-value thinking dropdown | Works |
 | Fast mode toggle | Yes (`fast` feature) | Yes (`Off`/`Fast` select, only on models with a `fast` param) | Works |
-| Slash commands | Dynamic via `available_commands_update` | Static `/plan` `/compact` `/review` `/commit` | Degraded |
+| Slash commands | Dynamic via `available_commands_update` | Local skills + command files, plus helper names that are free | Works, no team commands |
 | Tool approval | ACP permission-request flow | Auto-executed; deny cancels run; input questions surfaced | Degraded |
 | Revert | None (`supportsRewind*` all false) | Conversation-only (close + fresh agent; `files`/`both` throw) | Works, limited |
 | Archive / unarchive | Daemon/ACP session lifecycle | Local close + resume; unarchive no-op; cloud statics unused | Degraded |
