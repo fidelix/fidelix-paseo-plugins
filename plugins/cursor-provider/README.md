@@ -176,8 +176,8 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   the plugin bridge currently tags every plugin command as `kind: "command"`,
   so inline `/` stays empty until Paseo passes that kind through.
 - **Local runs auto-approve tools.** The SDK headless runtime executes tool calls
-  without interactive approval. `session.permission` `deny` only cancels the active
-  run; `question`-type input requests are surfaced as a `cursor-input` prompt.
+  without interactive approval, so the provider never raises a permission. The
+  stream's `request` event only announces the run's request id and is not shown.
   The composer's **Auto Accept** toggle (`auto_accept`, `shield-check` icon,
   same as OpenCode) maps to the SDK `autoReview` create flag: classifier-backed
   Auto mode when the backend has the classifier feature enabled, full-allow

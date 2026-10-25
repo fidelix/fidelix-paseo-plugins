@@ -80,8 +80,7 @@ export function isAskLikeMode(mode: string | undefined): boolean {
 
 /**
  * Auto-accept toggle. The SDK headless runtime executes tool calls without
- * interactive approval — deny only cancels the active run and `question`-type
- * input requests surface as `cursor-input` prompts. The id matches the
+ * interactive approval, so the provider never raises a permission. The id matches the
  * OpenCode convention (`auto_accept`, shield-check icon) so the composer
  * renders the familiar green shield instead of a generic gear, and its
  * tooltip/highlight behavior matches other providers. Maps to the SDK

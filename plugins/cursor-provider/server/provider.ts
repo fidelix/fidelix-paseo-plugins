@@ -352,7 +352,6 @@ function createConnection(
   /** Provider-owned child sessions keyed by child session id. */
   const children = new Map<string, ChildState>();
   const listeners = new Set<(event: ProviderEvent) => void>();
-  const permissions = new Map<string, { sessionId: string; requestId: string }>();
   let closed = false;
   /** Last catalog failure logged, so a broken key does not spam every refresh. */
   let lastCatalogError: string | null = null;
@@ -738,29 +737,10 @@ function createConnection(
         emit({ type: "request.completed", requestId: input.requestId });
         return;
       }
-      case "session.permission": {
-        const pendingPermission = permissions.get(input.permissionId);
-        if (!pendingPermission || pendingPermission.sessionId !== input.sessionId) {
-          throw new Error(`Unknown Cursor permission: ${input.permissionId}`);
-        }
-        permissions.delete(input.permissionId);
-        sessions.get(input.sessionId)?.turnDiag?.note("cursor_input_response", {
-          requestId: pendingPermission.requestId,
-          behavior: input.response.behavior,
-        });
-        // The Cursor SDK local runtime runs headless: tool calls execute
-        // without interactive approval. Deny interrupts the active run.
-        if (input.response.behavior === "deny") {
-          const state = sessions.get(input.sessionId);
-          if (state) cancelActiveTurn(state, true, "permission_deny");
-        }
-        emit({
-          type: "session.permission_resolved",
-          sessionId: input.sessionId,
-          permissionId: input.permissionId,
-        });
-        return;
-      }
+      case "session.permission":
+        // Local runs never ask: tool calls run headless, and the stream's
+        // `request` event only announces the run's request id.
+        throw new Error(`Unknown Cursor permission: ${input.permissionId}`);
       case "session.archive":
         await archiveSession(input.persistence);
         emit({ type: "request.completed", requestId: input.requestId });
@@ -774,7 +754,6 @@ function createConnection(
         if (state) {
           state.closed = true;
           sessions.delete(input.sessionId);
-          forgetPermissions(input.sessionId);
           cancelActiveTurn(state, false, "session_close");
           // Closing the SDK agent can wait on the runtime; the daemon only
           // needs the session gone, so finish teardown in the background.
@@ -935,13 +914,6 @@ function createConnection(
       if (other.activeRun || other.sendPending || other.cancelPending) return true;
     }
     return false;
-  }
-
-  /** Drop pending input requests of a session that is going away. */
-  function forgetPermissions(sessionId: string): void {
-    for (const [permissionId, pending] of permissions) {
-      if (pending.sessionId === sessionId) permissions.delete(permissionId);
-    }
   }
 
   function applyConfigure(state: SessionState, changes: ProviderConfigChanges): void {
@@ -1376,22 +1348,6 @@ function createConnection(
             id: assistantId,
             messageId: assistantId,
             text: assistantText,
-          },
-        });
-        continue;
-      }
-      if (event.type === "request") {
-        const permissionId = newId("permission");
-        permissions.set(permissionId, { sessionId: state.id, requestId: event.request_id });
-        emit({
-          type: "session.permission",
-          sessionId: state.id,
-          request: {
-            id: permissionId,
-            name: "cursor-input",
-            kind: "question",
-            title: "Cursor is waiting for input",
-            description: `Request ${event.request_id}`,
           },
         });
         continue;
@@ -1841,7 +1797,6 @@ function createConnection(
       cancelActiveTurn(state, false, "archive");
       await closeAgent(state).catch(() => undefined);
       sessions.delete(sessionId);
-      forgetPermissions(sessionId);
       emit({ type: "session.closed", sessionId });
     }
   }
@@ -1890,7 +1845,6 @@ function createConnection(
       );
       sessions.clear();
       children.clear();
-      permissions.clear();
       listeners.clear();
     },
   };
