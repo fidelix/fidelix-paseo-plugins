@@ -77,6 +77,7 @@ import {
   toUsageWithCost,
 } from "./mapping.js";
 import { readAgentContextWindow } from "./context-window.js";
+import { cancelRun } from "./run-cancel.js";
 import {
   classifyCursorError,
   DEFAULT_RETRY_POLICY,
@@ -388,17 +389,11 @@ function createConnection(
     state.turnAbort?.abort();
     state.turnAbort = null;
     if (run) {
-      state.cancelPending = run
-        .cancel()
-        .catch(() => undefined)
-        .then(() => undefined);
+      state.cancelPending = cancelRun(run);
     } else if (state.sendPending) {
       // Interrupted before the SDK returned the run object. Wait for it in the
       // background, then cancel whatever it produced.
-      state.cancelPending = state.sendPending
-        .then((pendingRun) => pendingRun.cancel())
-        .catch(() => undefined)
-        .then(() => undefined);
+      state.cancelPending = state.sendPending.then(cancelRun, () => undefined);
     }
     if (emitCanceled && turnId) {
       emit({ type: "session.turn", sessionId: state.id, turnId, state: "canceled" });
@@ -1157,7 +1152,7 @@ function createConnection(
         // Interrupted while `send` was in flight: the turn is already settled
         // for the daemon, so cancel this run without adopting it.
         if (state.activeTurnId !== turnId || signal.aborted || state.closed) {
-          void run.cancel().catch(() => undefined);
+          void cancelRun(run);
           return { status: "cancelled" };
         }
         state.activeRun = run;
