@@ -129,7 +129,7 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   for older `thinking` models), defaulting to the model's default variant.
 - Fast select (`Off`/`Fast`, lightning icon) on models that expose a `fast`
   parameter; hidden otherwise. Unset follows the model's default variant and
-  the control shows that default. Auto Accept is a separate shield toggle.
+  the control shows that default. Permission level is the mode (see below).
 - MCP servers (stdio + http/sse) passed through to the SDK.
 - Session persistence / listing / configure; usage reporting
   (input, cached-input, output tokens).
@@ -175,14 +175,21 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   later in the draft only lists entries the daemon tagged `kind: "skill"`, and
   the plugin bridge currently tags every plugin command as `kind: "command"`,
   so inline `/` stays empty until Paseo passes that kind through.
-- **Local runs auto-approve tools.** The SDK headless runtime executes tool calls
-  without interactive approval, so the provider never raises a permission. The
-  stream's `request` event only announces the run's request id and is not shown.
-  The composer's **Auto Accept** toggle (`auto_accept`, `shield-check` icon,
-  same as OpenCode) maps to the SDK `autoReview` create flag: classifier-backed
-  Auto mode when the backend has the classifier feature enabled, full-allow
-  headless execution otherwise. Pre-rename sessions stored the toggle under
-  `autoReview`; the first configure migrates the value forward.
+- **Permission level is the mode, like Claude and Codex.** Local SDK runs have
+  no approval channel, so the provider never raises a permission. The stream's
+  `request` event only announces the run's request id and is not shown.
+  - **Bypass** (default, `ShieldOff`, unattended): `autoReview: false`; every
+    tool call runs.
+  - **Auto-review** (`ShieldCheck`): `autoReview: true`; Cursor's Smart Auto
+    Review classifier vets each call, and a call it would ask about is denied
+    ("Local SDK runs cannot request interactive approval…").
+  - **Plan**: read-only SDK plan mode.
+
+  The SDK reads `autoReview` once per runtime, so switching between
+  Auto-review and Bypass reopens the agent before the next prompt. Sessions
+  from before the modes carry `agent` plus the retired Auto Accept toggle
+  (`auto_accept` / `autoReview`); toggle on opens as Auto-review, otherwise
+  Bypass.
 - **Reasoning effort is a value dropdown, fast is a select.** Thinking options
   are the model's effort-param *values* (e.g. `low`…`max`), never parameter
   ids (`effort`, `context`) or other models' values — switching models re-keys

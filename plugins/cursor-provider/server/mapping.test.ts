@@ -9,7 +9,7 @@ import type {
   CursorTokenUsage,
 } from "./cursor-sdk-types.ts";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
-import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDelegation, fastParamForModel, fastSelectValue, fastSettingState, publishableConfig, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
+import { describeTaskArgs, describeTaskResult, taskUpdateToolCall, usesPaseoDelegation, fastParamForModel, fastSelectValue, fastSettingState, isAutoReviewMode, publishableConfig, resolveCursorMode, resolveCursorModelParams, resolveThinkingParam, selectedThinkingOption, taskArgsOf, thinkingParamForModel, toProviderError, toProviderModels, toTimelineItem, toUsage } from "./mapping.ts";
 
 const IDS = { itemId: "item:1" };
 
@@ -421,7 +421,7 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
     assert.deepEqual(toProviderError("plain"), { message: "plain" });
   });
 
-  it("publishes one toggle plus no fast select for fast-less models", () => {
+  it("publishes no settings for fast-less models and defaults to Bypass", () => {
     const noFast: CursorModelListItem = {
       id: "gemini-3.8-flash",
       displayName: "Flash",
@@ -435,10 +435,15 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
       variants: [{ params: [{ id: "reasoning_effort", value: "high" }], displayName: "Flash", isDefault: true }],
     };
     const config = publishableConfig({ settings: {}, models: toProviderModels([noFast]), rawModels: [noFast] });
-    assert.equal(config.mode, "agent");
+    assert.equal(config.mode, "bypass");
+    assert.deepEqual(config.settings, []);
     assert.deepEqual(
-      config.settings.map((setting) => setting.id),
-      ["auto_accept"],
+      config.modes.map((mode) => [mode.id, mode.label, mode.icon, mode.isUnattended === true]),
+      [
+        ["auto-review", "Auto-review", "ShieldCheck", false],
+        ["bypass", "Bypass", "ShieldOff", true],
+        ["plan", "Plan", "ShieldEllipsis", false],
+      ],
     );
   });
 
@@ -451,17 +456,13 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
       rawModels: [grok()],
       thinkingSelections: {},
     });
-    assert.equal(config.settings.length, 2);
-    assert.equal(config.settings[0]?.id, "auto_accept");
-    assert.equal(config.settings[0]?.type, "toggle");
-    assert.equal(config.settings[0]?.label, "Auto Accept");
-    assert.equal(extra(config.settings[0], "icon"), "shield-check");
-    assert.equal(config.settings[1]?.id, "fast");
-    assert.equal(config.settings[1]?.type, "select");
-    assert.equal(extra(config.settings[1], "icon"), "zap");
+    assert.equal(config.settings.length, 1);
+    assert.equal(config.settings[0]?.id, "fast");
+    assert.equal(config.settings[0]?.type, "select");
+    assert.equal(extra(config.settings[0], "icon"), "zap");
     // Unset follows the default variant (fast=true for this fixture) and shows it.
-    assert.equal(config.settings[1] && "value" in config.settings[1] ? config.settings[1].value : undefined, "true");
-    const options = extra(config.settings[1], "options");
+    assert.equal(config.settings[0] && "value" in config.settings[0] ? config.settings[0].value : undefined, "true");
+    const options = extra(config.settings[0], "options");
     assert.equal(Array.isArray(options) && extra(options[0], "isDefault"), true);
     assert.equal(config.thinkingOption, "high");
     assert.deepEqual(
@@ -470,17 +471,17 @@ describe("toProviderModels / toProviderError / publishableConfig", () => {
     );
   });
 
-  it("reads the legacy autoReview key until the first write migrates it", () => {
-    const models = toProviderModels([grok()]);
-    const legacy = publishableConfig({
-      model: "grok-4.6",
-      settings: { autoReview: true },
-      models,
-      rawModels: [grok()],
-      thinkingSelections: {},
-    });
-    assert.equal(legacy.settings[0]?.type, "toggle");
-    assert.equal((legacy.settings[0] as { value: boolean }).value, true);
+  it("maps legacy agent mode plus the old Auto Accept toggle onto modes", () => {
+    assert.equal(resolveCursorMode("agent", { auto_accept: true }), "auto-review");
+    assert.equal(resolveCursorMode("agent", { autoReview: true }), "auto-review");
+    assert.equal(resolveCursorMode("agent", { auto_accept: false, autoReview: true }), "bypass");
+    assert.equal(resolveCursorMode(undefined, {}), "bypass");
+    assert.equal(resolveCursorMode("plan", { auto_accept: true }), "plan");
+    assert.equal(resolveCursorMode("bypass", { auto_accept: true }), "bypass");
+    assert.equal(resolveCursorMode("auto-review", {}), "auto-review");
+    assert.equal(isAutoReviewMode("auto-review"), true);
+    assert.equal(isAutoReviewMode("bypass"), false);
+    assert.equal(isAutoReviewMode("plan"), false);
   });
 
   it("re-keys thinking to the new model default on model switch", () => {

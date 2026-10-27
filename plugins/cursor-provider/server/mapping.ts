@@ -16,16 +16,35 @@ import type {
 } from "./cursor-sdk-types.js";
 import { randomUUID } from "node:crypto";
 
+export const CURSOR_MODE_AUTO_REVIEW = "auto-review";
+export const CURSOR_MODE_BYPASS = "bypass";
+export const CURSOR_MODE_PLAN = "plan";
+
+/**
+ * Permission levels are modes, like Paseo's built-in Claude (Auto / Bypass)
+ * and Codex (Auto-review / Full Access). Auto-review is the SDK `autoReview`
+ * flag: Cursor's classifier vets each tool call, and a call it escalates is
+ * denied because local SDK runs have no approval channel.
+ */
 export const CURSOR_MODES = [
   {
-    id: "agent",
-    label: "Agent",
-    description: "Implements changes directly",
-    icon: "Shield",
+    id: CURSOR_MODE_AUTO_REVIEW,
+    label: "Auto-review",
+    description:
+      "Cursor's classifier reviews tool calls. Calls it would ask about are denied; local runs cannot prompt.",
+    icon: "ShieldCheck",
     colorTier: "moderate",
   },
   {
-    id: "plan",
+    id: CURSOR_MODE_BYPASS,
+    label: "Bypass",
+    description: "Run every tool call without review (use with caution)",
+    icon: "ShieldOff",
+    colorTier: "dangerous",
+    isUnattended: true,
+  },
+  {
+    id: CURSOR_MODE_PLAN,
     label: "Plan",
     description: "Explores and plans first, read-only",
     icon: "ShieldEllipsis",
@@ -34,7 +53,23 @@ export const CURSOR_MODES = [
 ] as const;
 
 export const DEFAULT_CURSOR_MODEL = "composer-2.5";
-export const DEFAULT_CURSOR_MODE = "agent";
+export const DEFAULT_CURSOR_MODE = CURSOR_MODE_BYPASS;
+
+/**
+ * Current mode id for a requested one. Pre-mode sessions stored `agent` (or
+ * nothing) plus an Auto Accept toggle that actually enabled `autoReview`.
+ */
+export function resolveCursorMode(mode: string | undefined, settings: Record<string, unknown>): string {
+  if (mode === CURSOR_MODE_AUTO_REVIEW || mode === CURSOR_MODE_BYPASS || mode === CURSOR_MODE_PLAN) {
+    return mode;
+  }
+  if (isAskLikeMode(mode)) return mode!;
+  return legacyAutoReview(settings) ? CURSOR_MODE_AUTO_REVIEW : DEFAULT_CURSOR_MODE;
+}
+
+export function isAutoReviewMode(mode: string | undefined): boolean {
+  return mode === CURSOR_MODE_AUTO_REVIEW;
+}
 
 /**
  * Tool allowlist for `Agent.create` / `Agent.resume`.
@@ -71,32 +106,32 @@ export const CURSOR_READ_ONLY_TOOLS: readonly ["read", "grep", "glob", "ls"] = [
   "ls",
 ];
 
-/** Ask-like mode: anything that is not agent/plan but reads like "ask". */
+/** Ask-like mode: anything that is not a Cursor mode but reads like "ask". */
 export function isAskLikeMode(mode: string | undefined): boolean {
   if (!mode) return false;
-  if (mode === "agent" || mode === "plan") return false;
+  if (mode === "agent" || CURSOR_MODES.some((known) => known.id === mode)) return false;
   return mode.toLowerCase().includes("ask");
 }
 
 /**
- * Auto-accept toggle. The SDK headless runtime executes tool calls without
- * interactive approval, so the provider never raises a permission. The id matches the
- * OpenCode convention (`auto_accept`, shield-check icon) so the composer
- * renders the familiar green shield instead of a generic gear, and its
- * tooltip/highlight behavior matches other providers. Maps to the SDK
- * `autoReview` create flag (classifier-backed Auto mode when the backend
- * has the classifier feature enabled); stored under the `autoReview` key so
- * existing sessions keep their value across the rename.
+ * Retired Auto Accept toggle keys (`autoReview` before its rename). Read only
+ * to pick the mode of sessions that still carry the old `agent` mode.
  */
-export const CURSOR_SETTING_AUTO_ACCEPT = "auto_accept";
-/** Legacy storage key for the auto-accept toggle (pre-rename). */
-export const CURSOR_SETTING_AUTO_REVIEW = "autoReview";
+const LEGACY_SETTING_AUTO_ACCEPT = "auto_accept";
+const LEGACY_SETTING_AUTO_REVIEW = "autoReview";
+
+function legacyAutoReview(settings: Record<string, unknown>): boolean {
+  if (settings[LEGACY_SETTING_AUTO_ACCEPT] === true) return true;
+  if (settings[LEGACY_SETTING_AUTO_ACCEPT] === false) return false;
+  return settings[LEGACY_SETTING_AUTO_REVIEW] === true;
+}
+
 /**
  * Fast mode for models that expose a `fast` parameter. A select (Off/Fast),
  * same shape as the built-in Cursor ACP provider. The composer only swaps
- * the gear for a real icon when the setting carries one: `zap` here,
- * `shield-check` on auto-accept. Unset follows the model's default variant
- * and is displayed as that variant so the control is not blank.
+ * the gear for a real icon when the setting carries one (`zap`). Unset
+ * follows the model's default variant and is displayed as that variant so
+ * the control is not blank.
  */
 export const CURSOR_SETTING_FAST = "fast";
 
@@ -507,10 +542,8 @@ export function publishableConfig(args: {
 }
 
 /**
- * Exactly one toggle (auto-accept) and at most one select (fast, only when
- * the current model exposes a `fast` param). A constant two-setting array
- * renders a second identical gear button, and a fast toggle on a fast-less
- * model silently does nothing.
+ * At most one select (fast, only when the current model exposes a `fast`
+ * param): a fast control on a fast-less model silently does nothing.
  */
 function sessionSettings(
   settings: Record<string, unknown>,
@@ -518,20 +551,9 @@ function sessionSettings(
   rawModels: CursorModelListItem[] | undefined,
 ): ProviderConfigState["settings"] {
   // The plugin setting type has no icon, but the daemon copies the object
-  // through (`{ ...setting }`). shield-check and zap are the composer names
-  // (green shield vs lightning). Without them both controls render as gears.
+  // through (`{ ...setting }`). Without `zap` the control renders as a gear.
   const model = findRawModel(rawModels, modelId);
-  const out: Array<Record<string, unknown>> = [
-    {
-      type: "toggle",
-      id: CURSOR_SETTING_AUTO_ACCEPT,
-      label: "Auto Accept",
-      description: "Automatically approves Cursor tool calls without asking.",
-      tooltip: "Auto accept permission prompts",
-      icon: "shield-check",
-      value: isAutoAcceptEnabled(settings),
-    },
-  ];
+  const out: Array<Record<string, unknown>> = [];
   if (fastParamForModel(model)) {
     out.push({
       type: "select",
@@ -548,16 +570,6 @@ function sessionSettings(
     });
   }
   return out as unknown as ProviderConfigState["settings"];
-}
-
-/**
- * Auto-accept state with legacy fallback: pre-rename sessions stored the
- * toggle under `autoReview`. New writes always use `auto_accept`.
- */
-export function isAutoAcceptEnabled(settings: Record<string, unknown>): boolean {
-  if (settings[CURSOR_SETTING_AUTO_ACCEPT] === true) return true;
-  if (settings[CURSOR_SETTING_AUTO_ACCEPT] === false) return false;
-  return settings[CURSOR_SETTING_AUTO_REVIEW] === true;
 }
 
 /** Per-model thinking options: only the selected model's parameter ids. */

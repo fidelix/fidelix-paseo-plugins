@@ -51,16 +51,16 @@ import {
 } from "./cursor-commands.js";
 import {
   applySettings,
-  CURSOR_SETTING_AUTO_ACCEPT,
-  CURSOR_SETTING_AUTO_REVIEW,
+  CURSOR_MODES,
   DEFAULT_CURSOR_MODE,
   DEFAULT_CURSOR_MODEL,
   describeTaskArgs,
   describeTaskResult,
   findRawModel,
-  isAutoAcceptEnabled,
+  isAutoReviewMode,
   newId,
   publishableConfig,
+  resolveCursorMode,
   resolveCursorModelParams,
   resolveCursorTools,
   resolveThinkingParam,
@@ -122,6 +122,8 @@ interface SessionState {
   /** Per-model stored thinking param values: raw model id -> param value. */
   thinkingSelections: Record<string, string>;
   agent: CursorAgent | null;
+  /** `autoReview` the live runtime was built with; the SDK fixes it per runtime. */
+  runtimeAutoReview: boolean;
   activeTurnId: string | null;
   activeRun: CursorRun | null;
   closed: boolean;
@@ -672,11 +674,12 @@ function createConnection(
           throw new Error(`Session already exists: ${input.sessionId}`);
         }
         const { models, raw } = await ensureCatalog(input.config);
+        const settings = { ...(input.config.settings ?? {}) };
         const state: SessionState = {
           id: input.sessionId,
-          config: input.config,
+          config: { ...input.config, mode: resolveCursorMode(input.config.mode, settings) },
           model: input.config.model,
-          settings: { ...(input.config.settings ?? {}) },
+          settings,
           models,
           rawModels: raw,
           // Seed from the daemon's launch config so a restored draft
@@ -687,6 +690,7 @@ function createConnection(
               ? { [canonicalKey(raw, input.config.model)]: input.config.thinkingOption }
               : {},
           agent: null,
+          runtimeAutoReview: false,
           activeTurnId: null,
           activeRun: null,
           closed: false,
@@ -702,7 +706,7 @@ function createConnection(
         };
         sessions.set(input.sessionId, state);
         try {
-          await openSession(state, input.config, input.persistence, input.requestId);
+          await openSession(state, state.config, input.persistence, input.requestId);
         } catch (error) {
           sessions.delete(input.sessionId);
           await closeAgent(state).catch(() => undefined);
@@ -810,6 +814,39 @@ function createConnection(
     }) as ["mcp"] | ["read", "grep", "glob", "ls"] | undefined;
   }
 
+  async function resumeAgent(
+    state: SessionState,
+    agentId: string,
+    apiKey: string | undefined,
+    store: CursorLocalAgentStore,
+  ): Promise<CursorAgent> {
+    const { Agent } = loadCursorSdk();
+    const tools = sessionTools(state);
+    return (await Agent.resume(agentId, {
+      ...(apiKey ? { apiKey } : {}),
+      model: resolveModelSelection(state),
+      ...(tools ? { tools } : {}),
+      ...(usesPaseoDelegation(state.config) ? { disallowedTools: ["task"] } : {}),
+      local: cursorLocalOptions(state.config, store, isAutoReviewMode(state.config.mode)),
+    })) as CursorAgent;
+  }
+
+  /**
+   * The SDK reads `autoReview` once per runtime, so a switch between
+   * Auto-review and Bypass reopens the same agent with the new flag.
+   */
+  async function syncReviewRuntime(state: SessionState): Promise<void> {
+    const autoReview = isAutoReviewMode(state.config.mode);
+    if (!state.agent || state.runtimeAutoReview === autoReview) return;
+    await waitForPriorCancel(state);
+    const agentId = state.agent.agentId;
+    const apiKey = await readKey(state.config);
+    const store = await openStore(state.config);
+    await closeAgent(state);
+    state.agent = await resumeAgent(state, agentId, apiKey, store);
+    state.runtimeAutoReview = autoReview;
+  }
+
   async function openSession(
     state: SessionState,
     config: ProviderSessionConfig,
@@ -826,26 +863,22 @@ function createConnection(
       : undefined;
     if (persistedAgentId) await settleOrphan(store, persistedAgentId);
     const tools = sessionTools(state);
+    const autoReview = isAutoReviewMode(config.mode);
     const agent = (
       persistedAgentId
-        ? await Agent.resume(persistedAgentId, {
-            ...(apiKey ? { apiKey } : {}),
-            model: resolveModelSelection(state),
-            ...(tools ? { tools } : {}),
-            ...(usesPaseoDelegation(config) ? { disallowedTools: ["task"] } : {}),
-            local: cursorLocalOptions(config, store),
-          })
+        ? await resumeAgent(state, persistedAgentId, apiKey, store)
         : await Agent.create({
             ...(apiKey ? { apiKey } : {}),
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
             ...(usesPaseoDelegation(config) ? { disallowedTools: ["task"] } : {}),
-            local: cursorLocalOptions(config, store, isAutoAcceptEnabled(state.settings)),
+            local: cursorLocalOptions(config, store, autoReview),
             ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
             mcpServers: toMcpServers(config),
           })
     ) as CursorAgent;
     state.agent = agent;
+    state.runtimeAutoReview = autoReview;
     if (config.persist) {
       const value = { version: 1, data: { agentId: agent.agentId } } as ProviderPersistence;
       emit({ type: "session.persistence", sessionId: state.id, persistence: value });
@@ -936,21 +969,12 @@ function createConnection(
       delete state.thinkingSelections[key];
     }
     applySettings(state.settings, changes.settings as Record<string, unknown> | undefined);
-    // Pre-rename sessions stored the toggle under `autoReview`; migrate the
-    // value forward so one stored key never splits the toggle state.
-    if (
-      CURSOR_SETTING_AUTO_ACCEPT in state.settings &&
-      !(CURSOR_SETTING_AUTO_REVIEW in (changes.settings as Record<string, unknown> | undefined ?? {}))
-    ) {
-      delete state.settings[CURSOR_SETTING_AUTO_REVIEW];
-    } else if (CURSOR_SETTING_AUTO_REVIEW in state.settings) {
-      state.settings[CURSOR_SETTING_AUTO_ACCEPT] = state.settings[CURSOR_SETTING_AUTO_REVIEW];
-      delete state.settings[CURSOR_SETTING_AUTO_REVIEW];
-    }
     if (changes.mode !== undefined) {
+      // An Auto-review/Bypass switch takes effect on the next prompt, which
+      // reopens the runtime (see syncReviewRuntime).
       state.config = {
         ...state.config,
-        mode: changes.mode ?? undefined,
+        mode: resolveCursorMode(changes.mode ?? undefined, state.settings),
       };
     }
     emit({
@@ -1051,6 +1075,7 @@ function createConnection(
     state.turnDiag = turnDiag;
     let outcome: TurnOutcome = { status: "canceled" };
     try {
+      await syncReviewRuntime(state);
       const result = await sendWithRetry(state, text, images, turnId, turnAbort.signal, turnDiag);
       if (result.status === "error") outcome = { status: "failed", error: result.error };
       // An interrupt already settled this turn (cleared activeTurnId and
@@ -1749,10 +1774,11 @@ function createConnection(
       model: resolveModelSelection(state),
       ...(tools ? { tools } : {}),
       ...(usesPaseoDelegation(state.config) ? { disallowedTools: ["task"] } : {}),
-      local: cursorLocalOptions(state.config, store, isAutoAcceptEnabled(state.settings)),
+      local: cursorLocalOptions(state.config, store, isAutoReviewMode(state.config.mode)),
       ...(state.config.systemPrompt ? { systemPrompt: state.config.systemPrompt } : {}),
       mcpServers: toMcpServers(state.config),
     })) as CursorAgent;
+    state.runtimeAutoReview = isAutoReviewMode(state.config.mode);
     if (state.config.persist) {
       emit({
         type: "session.persistence",
@@ -1857,18 +1883,18 @@ const CURSOR_SETTING_SOURCES = ["project", "user", "plugins"] as const;
 function cursorLocalOptions(
   config: Pick<ProviderSessionConfig, "cwd">,
   store: CursorLocalAgentStore,
-  autoReview?: boolean,
+  autoReview: boolean,
 ): {
   cwd: string;
   store: CursorLocalAgentStore;
   settingSources: Array<(typeof CURSOR_SETTING_SOURCES)[number]>;
-  autoReview?: boolean;
+  autoReview: boolean;
 } {
   return {
     cwd: config.cwd,
     store,
     settingSources: [...CURSOR_SETTING_SOURCES],
-    ...(autoReview === undefined ? {} : { autoReview }),
+    autoReview,
   };
 }
 
@@ -1885,10 +1911,7 @@ function toCatalog(models: ProviderModel[]): ProviderCatalog {
   const fallback = models.length > 0 ? models : fallbackCatalog().models;
   return {
     models: fallback,
-    modes: [
-      { id: "agent", label: "Agent", description: "Implements changes directly" },
-      { id: "plan", label: "Plan", description: "Explores and plans first, read-only" },
-    ],
+    modes: [...CURSOR_MODES],
     defaultModel: DEFAULT_CURSOR_MODEL,
     defaultMode: DEFAULT_CURSOR_MODE,
   };
@@ -1897,10 +1920,7 @@ function toCatalog(models: ProviderModel[]): ProviderCatalog {
 function fallbackCatalog(): ProviderCatalog {
   return {
     models: [{ id: DEFAULT_CURSOR_MODEL, label: "Composer 2.5" }],
-    modes: [
-      { id: "agent", label: "Agent", description: "Implements changes directly" },
-      { id: "plan", label: "Plan", description: "Explores and plans first, read-only" },
-    ],
+    modes: [...CURSOR_MODES],
     defaultModel: DEFAULT_CURSOR_MODEL,
     defaultMode: DEFAULT_CURSOR_MODE,
   };
