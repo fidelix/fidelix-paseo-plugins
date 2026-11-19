@@ -56,7 +56,7 @@ const BUILTIN_ENTRIES: readonly CursorSlashEntry[] = [
   },
   {
     name: "compact",
-    description: "Summarize this conversation so far",
+    description: "Compact the conversation: Cursor summarizes it to free context",
     argumentHint: "",
     kind: "builtin",
   },

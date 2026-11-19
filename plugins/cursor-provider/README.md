@@ -175,6 +175,15 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   later in the draft only lists entries the daemon tagged `kind: "skill"`, and
   the plugin bridge currently tags every plugin command as `kind: "command"`,
   so inline `/` stays empty until Paseo passes that kind through.
+- **`/compact` really compacts.** Cursor compacts with a `summarizeAction`
+  (cursor-agent's `/compress`), which SDK runs never send: `agent.send` always
+  builds a user message. `server/cursor-sdk-loader.js` rewrites that one site
+  in the local-executor chunk (`dist/cjs/867.js`, exact match on SDK 1.0.36)
+  so a sentinel prompt sends the summarize action. `/compact` from the slash
+  menu or typed as the whole message sends it and shows Paseo's compaction
+  row; Cursor's own mid-turn summaries show as `auto`. On an SDK build where
+  the rewrite does not match, `/compact` fails with "Compaction is
+  unavailable" instead of reaching the model, and the loader test fails.
 - **Permission level is the mode, like Claude and Codex.** Local SDK runs have
   no approval channel, so the provider never raises a permission. The stream's
   `request` event only announces the run's request id and is not shown.

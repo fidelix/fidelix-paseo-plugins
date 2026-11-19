@@ -16,7 +16,7 @@ import type { cursorSettings } from "../shared/settings.js";
 export type CursorPluginSettings = PluginSettings<(typeof cursorSettings)["schema"]>;
 
 import { z } from "zod";
-import { loadCursorSdk } from "./cursor-sdk-loader.js";
+import { CURSOR_SUMMARIZE_PROMPT, cursorSummarizeSupported, loadCursorSdk } from "./cursor-sdk-loader.js";
 import type { CursorLocalAgentStore } from "./cursor-sdk-loader.js";
 import {
   agentStoreDbPath,
@@ -152,6 +152,16 @@ interface SessionState {
   slashCatalog: Map<string, CursorSlashEntry>;
   /** Diagnostics for the active turn; cancel paths note their reason here. */
   turnDiag: TurnDiagnostics | null;
+  /** `/compact` turn and its timeline item. */
+  compaction: CompactionState | null;
+  /** Summarization Cursor started on its own inside a regular turn. */
+  autoCompaction: CompactionState | null;
+}
+
+interface CompactionState {
+  turnId: string;
+  itemId: string | null;
+  completed: boolean;
 }
 
 interface ChildState {
@@ -246,6 +256,18 @@ function promptText(
     else throw new Error("Cursor provider supports text and image content only");
   }
   return { text: text.join("\n"), images };
+}
+
+/**
+ * `/compact` as the built-in command, or typed as the whole message (Paseo
+ * sends it as text when the slash menu is not used).
+ */
+function isCompactPrompt(prompt: ProviderPrompt, catalog: Map<string, CursorSlashEntry>): boolean {
+  if (prompt.input.type === "command") {
+    return prompt.input.name === "compact" && catalog.get("compact")?.kind === "builtin";
+  }
+  const parts = prompt.input.content;
+  return parts.length === 1 && parts[0]?.type === "text" && parts[0].text.trim() === "/compact";
 }
 
 function promptLabel(prompt: ProviderPrompt): string {
@@ -703,6 +725,8 @@ function createConnection(
           pendingTaskUpdates: new Map(),
           slashCatalog: new Map(),
           turnDiag: null,
+          compaction: null,
+          autoCompaction: null,
         };
         sessions.set(input.sessionId, state);
         try {
@@ -1013,8 +1037,9 @@ function createConnection(
       });
       return;
     }
+    const compact = isCompactPrompt(prompt, state.slashCatalog);
     if (state.activeTurnId) {
-      if (prompt.delivery === "steer") {
+      if (prompt.delivery === "steer" && !compact) {
         const outcome = await state.activeRun?.steer?.(promptText(prompt, state.slashCatalog).text).catch(
           () => undefined,
         );
@@ -1039,11 +1064,27 @@ function createConnection(
       });
       return;
     }
-    const { text, images } = promptText(prompt, state.slashCatalog);
+    if (compact && !cursorSummarizeSupported()) {
+      emit({
+        type: "session.prompt_result",
+        sessionId: state.id,
+        clientMessageId: prompt.clientMessageId,
+        result: {
+          type: "failed",
+          error: { message: "Compaction is unavailable: this @cursor/sdk build does not match the summarize patch" },
+        },
+      });
+      return;
+    }
+    const { text, images } = compact
+      ? { text: CURSOR_SUMMARIZE_PROMPT, images: [] }
+      : promptText(prompt, state.slashCatalog);
     const turnId = newId("turn");
     const turnAbort = new AbortController();
     state.activeTurnId = turnId;
     state.turnAbort = turnAbort;
+    state.compaction = compact ? { turnId, itemId: null, completed: false } : null;
+    state.autoCompaction = null;
     state.turnSeq += 1;
     const messageId = `user:${state.turnSeq}`;
     emit({
@@ -1059,7 +1100,7 @@ function createConnection(
       item: {
         type: "user_message",
         id: messageId,
-        text: prompt.input.type === "command" ? promptLabel(prompt) : text,
+        text: compact ? "/compact" : prompt.input.type === "command" ? promptLabel(prompt) : text,
         clientMessageId: prompt.clientMessageId,
         revertToken: { messageId },
       },
@@ -1102,6 +1143,18 @@ function createConnection(
         return;
       }
       outcome = { status: "completed" };
+      if (state.compaction?.turnId === turnId && !state.compaction.completed) {
+        emit({
+          type: "timeline.item",
+          sessionId: state.id,
+          item: {
+            type: "notification",
+            id: newId("compaction-missing"),
+            level: "warning",
+            message: "Cursor finished the compaction run without reporting a summary.",
+          },
+        });
+      }
       emit({ type: "session.turn", sessionId: state.id, turnId, state: "completed" });
     } catch (error) {
       const failure = toProviderError(error);
@@ -1399,6 +1452,10 @@ function createConnection(
    */
   function acceptDelta(state: SessionState, turnId: string, update: CursorInteractionUpdate): void {
     if (state.closed || state.activeTurnId !== turnId) return;
+    if (update.type === "summary-started" || update.type === "summary-completed") {
+      acceptSummaryUpdate(state, turnId, update.type === "summary-completed");
+      return;
+    }
     if (update.type !== "tool-call-delta") return;
     const { callId, taskUpdate } = update as Extract<CursorInteractionUpdate, { type: "tool-call-delta" }>;
     const childId = state.taskChildren.get(callId);
@@ -1413,6 +1470,25 @@ function createConnection(
       state.pendingTaskUpdates.set(callId, pending);
     }
     if (pending.length < MAX_PENDING_TASK_UPDATES) pending.push(taskUpdate);
+  }
+
+  /** Cursor summarizes on `/compact` and on its own when the context fills. */
+  function acceptSummaryUpdate(state: SessionState, turnId: string, completed: boolean): void {
+    const manual = state.compaction?.turnId === turnId;
+    const compaction = manual ? state.compaction! : (state.autoCompaction ??= { turnId, itemId: null, completed: false });
+    compaction.itemId ??= newId("compaction");
+    compaction.completed = completed;
+    emit({
+      type: "timeline.item",
+      sessionId: state.id,
+      item: {
+        type: "compaction",
+        id: compaction.itemId,
+        status: completed ? "completed" : "loading",
+        trigger: manual ? "manual" : "auto",
+      },
+    });
+    if (completed && !manual) state.autoCompaction = null;
   }
 
   function applyTaskUpdate(childId: string, update: CursorTaskUpdate): void {
@@ -1627,7 +1703,7 @@ function createConnection(
           push({
             type: "user_message",
             id: newId("user"),
-            text: userText,
+            text: userText === CURSOR_SUMMARIZE_PROMPT ? "/compact" : userText,
             revertToken: { messageId },
           });
           for (const hint of imageHintsOf(turn?.user)) {
@@ -1640,7 +1716,12 @@ function createConnection(
             state.turnSeq += 1;
             const messageId = `user:${state.turnSeq}`;
             state.userMessageIds.push(messageId);
-            push({ type: "user_message", id: newId("user"), text, revertToken: { messageId } });
+            push({
+              type: "user_message",
+              id: newId("user"),
+              text: text === CURSOR_SUMMARIZE_PROMPT ? "/compact" : text,
+              revertToken: { messageId },
+            });
           }
         }
         for (const step of turn?.steps ?? []) {

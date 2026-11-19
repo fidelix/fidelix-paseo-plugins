@@ -193,9 +193,62 @@ function sdkRequire() {
   return cachedRequire;
 }
 
+// Cursor compacts a conversation with a `summarizeAction` (cursor-agent's
+// /compress), but the SDK's local runs only ever build a `userMessageAction`.
+// Rewrite that one site in the local-executor chunk so a run whose prompt is
+// CURSOR_SUMMARIZE_PROMPT sends the summarize action instead. The rewrite is
+// exact-match: on any other SDK build it does not apply and compaction reports
+// itself unavailable rather than sending the sentinel to the model.
+const CURSOR_SUMMARIZE_PROMPT = "\u0000cursor-provider:summarize\u0000";
+const EXECUTOR_CHUNK = /[\\/]@cursor[\\/]sdk[\\/]dist[\\/]cjs[\\/]867\.js$/;
+const ACTION_SITE = 'S=new vr.QFf({action:{case:"userMessageAction",value:new vr.Vtf({userMessage:new vr.RGk({text:e.text,';
+const SUMMARIZE_STATE = Symbol.for("cursor-provider.summarize");
+
+function summarizeState() {
+  const holder = globalThis;
+  holder[SUMMARIZE_STATE] ??= { hooked: false, patched: false };
+  return holder[SUMMARIZE_STATE];
+}
+
+function installSummarizePatch() {
+  const state = summarizeState();
+  if (state.hooked) return;
+  state.hooked = true;
+  const Module = require("node:module");
+  const compile = Module.prototype._compile;
+  Module.prototype._compile = function (content, filename) {
+    if (typeof content === "string" && EXECUTOR_CHUNK.test(String(filename))) {
+      const first = content.indexOf(ACTION_SITE);
+      if (first >= 0 && content.indexOf(ACTION_SITE, first + 1) < 0) {
+        const rewritten =
+          `S=e.text===${JSON.stringify(CURSOR_SUMMARIZE_PROMPT)}?vr.QFf.fromJson({summarizeAction:{}}):` +
+          ACTION_SITE.slice(2);
+        content = content.slice(0, first) + rewritten + content.slice(first + ACTION_SITE.length);
+        state.patched = true;
+      }
+    }
+    return compile.call(this, content, filename);
+  };
+}
+
 function loadCursorSdk() {
-  if (!cached) cached = sdkRequire()("@cursor/sdk");
+  if (!cached) {
+    installSummarizePatch();
+    const load = sdkRequire();
+    cached = load("@cursor/sdk");
+    // Chunks are lazy; compiling this one now (webpack later reuses the
+    // require-cache entry) tells us up front whether the rewrite applied.
+    try {
+      load(path.join(path.dirname(load.resolve("@cursor/sdk")), "867.js"));
+    } catch {
+      // Missing chunk: a different SDK build, so compaction stays unavailable.
+    }
+  }
   return cached;
+}
+
+function cursorSummarizeSupported() {
+  return summarizeState().patched;
 }
 
 // Separate entry so the sqlite driver (node:sqlite) only loads when a
@@ -205,4 +258,4 @@ function loadCursorSdkSqlite() {
   return cachedSqlite;
 }
 
-module.exports = { loadCursorSdk, loadCursorSdkSqlite };
+module.exports = { loadCursorSdk, loadCursorSdkSqlite, cursorSummarizeSupported, CURSOR_SUMMARIZE_PROMPT };
