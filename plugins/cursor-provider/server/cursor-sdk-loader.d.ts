@@ -84,9 +84,5 @@ export interface CursorLocalAgentRunDocument {
 
 declare const loadCursorSdk: () => CursorSdkModule;
 declare const loadCursorSdkSqlite: () => CursorSdkSqliteModule;
-/** True once the local-executor chunk was rewritten to send `summarizeAction`. */
-declare const cursorSummarizeSupported: () => boolean;
-/** Prompt text that makes a local run send `summarizeAction` instead of a user message. */
-declare const CURSOR_SUMMARIZE_PROMPT: string;
 
-export { loadCursorSdk, loadCursorSdkSqlite, cursorSummarizeSupported, CURSOR_SUMMARIZE_PROMPT };
+export { loadCursorSdk, loadCursorSdkSqlite };

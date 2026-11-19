@@ -8,7 +8,7 @@ It registers provider id `cursor-sdk` ("Cursor SDK", `server/provider.ts:203`).
 
 - Paseo `>=0.10.3` (see `requirements` in `paseo-plugin.json`; matches the installed
   `@getpaseo/plugin` / `@getpaseo/protocol` 0.10.3 SDK).
-- Node `>=22.13` on the daemon host (the `@cursor/sdk@1.0.36` `engines` floor).
+- Node `>=22.13` on the daemon host (the `@cursor/sdk@1.4.2` `engines` floor).
 - No build step: Paseo compiles the TypeScript entries on load, and Git installs run
   no package manager or install scripts, so no `prepare`/`prepack` entry is needed
   (see "Ship notes" below).
@@ -175,15 +175,14 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   later in the draft only lists entries the daemon tagged `kind: "skill"`, and
   the plugin bridge currently tags every plugin command as `kind: "command"`,
   so inline `/` stays empty until Paseo passes that kind through.
-- **`/compact` really compacts.** Cursor compacts with a `summarizeAction`
-  (cursor-agent's `/compress`), which SDK runs never send: `agent.send` always
-  builds a user message. `server/cursor-sdk-loader.js` rewrites that one site
-  in the local-executor chunk (`dist/cjs/867.js`, exact match on SDK 1.0.36)
-  so a sentinel prompt sends the summarize action. `/compact` from the slash
-  menu or typed as the whole message sends it and shows Paseo's compaction
-  row; Cursor's own mid-turn summaries show as `auto`. On an SDK build where
-  the rewrite does not match, `/compact` fails with "Compaction is
-  unavailable" instead of reaching the model, and the loader test fails.
+- **`/compact` runs `agent.summarize()`** (SDK ≥ 1.4, the CLI's `/summarize`).
+  From the slash menu or typed as the whole message, it starts a summarize run
+  instead of a send; later sends see the summary instead of the transcript.
+  The run's `summary` stream messages drive Paseo's compaction row (`manual`;
+  Cursor's own summaries near the context limit show as `auto`). `error`
+  shows "the conversation is unchanged", and `fallback: true` warns that a
+  trimmed transcript was saved instead. The SDK refuses (`ConfigurationError`,
+  not retried) on an agent with no saved conversation yet.
 - **Permission level is the mode, like Claude and Codex.** Local SDK runs have
   no approval channel, so the provider never raises a permission. The stream's
   `request` event only announces the run's request id and is not shown.

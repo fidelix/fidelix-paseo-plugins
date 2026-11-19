@@ -1,4 +1,4 @@
-// The SDK's local executor is shipped as one line (`dist/cjs/867.js`, about 1MB).
+// The SDK's local executor is shipped as one line (a `dist/cjs/<chunk>.js`, about 1MB).
 // Node's fatal printer echoes that whole line before the error message, and
 // Paseo keeps 16KB per log line, so a crash there records the bundle and
 // `Node.js v…` and then exits. Every open session dies with it.

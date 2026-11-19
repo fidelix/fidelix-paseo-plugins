@@ -16,7 +16,7 @@ import type { cursorSettings } from "../shared/settings.js";
 export type CursorPluginSettings = PluginSettings<(typeof cursorSettings)["schema"]>;
 
 import { z } from "zod";
-import { CURSOR_SUMMARIZE_PROMPT, cursorSummarizeSupported, loadCursorSdk } from "./cursor-sdk-loader.js";
+import { loadCursorSdk } from "./cursor-sdk-loader.js";
 import type { CursorLocalAgentStore } from "./cursor-sdk-loader.js";
 import {
   agentStoreDbPath,
@@ -1064,21 +1064,7 @@ function createConnection(
       });
       return;
     }
-    if (compact && !cursorSummarizeSupported()) {
-      emit({
-        type: "session.prompt_result",
-        sessionId: state.id,
-        clientMessageId: prompt.clientMessageId,
-        result: {
-          type: "failed",
-          error: { message: "Compaction is unavailable: this @cursor/sdk build does not match the summarize patch" },
-        },
-      });
-      return;
-    }
-    const { text, images } = compact
-      ? { text: CURSOR_SUMMARIZE_PROMPT, images: [] }
-      : promptText(prompt, state.slashCatalog);
+    const { text, images } = compact ? { text: "", images: [] } : promptText(prompt, state.slashCatalog);
     const turnId = newId("turn");
     const turnAbort = new AbortController();
     state.activeTurnId = turnId;
@@ -1117,7 +1103,7 @@ function createConnection(
     let outcome: TurnOutcome = { status: "canceled" };
     try {
       await syncReviewRuntime(state);
-      const result = await sendWithRetry(state, text, images, turnId, turnAbort.signal, turnDiag);
+      const result = await sendWithRetry(state, compact ? null : { text, images }, turnId, turnAbort.signal, turnDiag);
       if (result.status === "error") outcome = { status: "failed", error: result.error };
       // An interrupt already settled this turn (cleared activeTurnId and
       // emitted `canceled`); never overwrite a newer turn's state.
@@ -1193,8 +1179,8 @@ function createConnection(
 
   async function sendWithRetry(
     state: SessionState,
-    text: string,
-    images: Array<{ data: string; mimeType: string }>,
+    /** `null` summarizes the conversation (`/compact`) instead of sending. */
+    message: { text: string; images: Array<{ data: string; mimeType: string }> } | null,
     turnId: string,
     signal: AbortSignal,
     turnDiag: TurnDiagnostics,
@@ -1210,15 +1196,19 @@ function createConnection(
       try {
         await waitForPriorCancel(state);
         if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
-        const sending = state.agent!.send(images.length > 0 ? { text, images } : text, {
-          model: resolveModelSelection(state),
-          mode: toAgentMode(state.config.mode),
-          mcpServers: toMcpServers(state.config),
-          onDelta: ({ update }) => {
-            turnDiag.delta(update.type);
-            acceptDelta(state, turnId, update);
-          },
-        }) as Promise<CursorRun>;
+        const sending = (
+          message === null
+            ? state.agent!.summarize()
+            : state.agent!.send(message.images.length > 0 ? message : message.text, {
+                model: resolveModelSelection(state),
+                mode: toAgentMode(state.config.mode),
+                mcpServers: toMcpServers(state.config),
+                onDelta: ({ update }) => {
+                  turnDiag.delta(update.type);
+                  acceptDelta(state, turnId, update);
+                },
+              })
+        ) as Promise<CursorRun>;
         state.sendPending = sending;
         let run: CursorRun;
         try {
@@ -1395,6 +1385,10 @@ function createConnection(
     for await (const event of run.stream()) {
       turnDiag.event(event);
       if (state.closed || state.activeTurnId !== turnId) break;
+      if (event.type === "summary") {
+        acceptSummary(state, turnId, event);
+        continue;
+      }
       if (event.type === "usage") {
         delivery.usage = true;
         emit({ type: "session.usage", sessionId: state.id, turnId, usage: toUsage(event.usage) });
@@ -1452,10 +1446,6 @@ function createConnection(
    */
   function acceptDelta(state: SessionState, turnId: string, update: CursorInteractionUpdate): void {
     if (state.closed || state.activeTurnId !== turnId) return;
-    if (update.type === "summary-started" || update.type === "summary-completed") {
-      acceptSummaryUpdate(state, turnId, update.type === "summary-completed");
-      return;
-    }
     if (update.type !== "tool-call-delta") return;
     const { callId, taskUpdate } = update as Extract<CursorInteractionUpdate, { type: "tool-call-delta" }>;
     const childId = state.taskChildren.get(callId);
@@ -1472,23 +1462,56 @@ function createConnection(
     if (pending.length < MAX_PENDING_TASK_UPDATES) pending.push(taskUpdate);
   }
 
-  /** Cursor summarizes on `/compact` and on its own when the context fills. */
-  function acceptSummaryUpdate(state: SessionState, turnId: string, completed: boolean): void {
+  /**
+   * `summary` stream messages: Cursor summarizes on `/compact` and on its own
+   * when the context fills. `error` leaves the conversation unchanged.
+   */
+  function acceptSummary(
+    state: SessionState,
+    turnId: string,
+    event: { status: "running" | "completed" | "error"; fallback?: boolean },
+  ): void {
     const manual = state.compaction?.turnId === turnId;
     const compaction = manual ? state.compaction! : (state.autoCompaction ??= { turnId, itemId: null, completed: false });
     compaction.itemId ??= newId("compaction");
-    compaction.completed = completed;
-    emit({
-      type: "timeline.item",
-      sessionId: state.id,
-      item: {
-        type: "compaction",
-        id: compaction.itemId,
-        status: completed ? "completed" : "loading",
-        trigger: manual ? "manual" : "auto",
-      },
-    });
-    if (completed && !manual) state.autoCompaction = null;
+    if (event.status === "error") {
+      compaction.completed = true;
+      emit({
+        type: "timeline.item",
+        sessionId: state.id,
+        item: {
+          type: "notification",
+          id: compaction.itemId,
+          level: "error",
+          message: "Cursor couldn't summarize; the conversation is unchanged.",
+        },
+      });
+    } else {
+      compaction.completed = event.status === "completed";
+      emit({
+        type: "timeline.item",
+        sessionId: state.id,
+        item: {
+          type: "compaction",
+          id: compaction.itemId,
+          status: compaction.completed ? "completed" : "loading",
+          trigger: manual ? "manual" : "auto",
+        },
+      });
+      if (event.fallback === true) {
+        emit({
+          type: "timeline.item",
+          sessionId: state.id,
+          item: {
+            type: "notification",
+            id: newId("compaction-fallback"),
+            level: "warning",
+            message: "Summarized from a trimmed transcript: long messages may be cut short.",
+          },
+        });
+      }
+    }
+    if (compaction.completed && !manual) state.autoCompaction = null;
   }
 
   function applyTaskUpdate(childId: string, update: CursorTaskUpdate): void {
@@ -1703,7 +1726,7 @@ function createConnection(
           push({
             type: "user_message",
             id: newId("user"),
-            text: userText === CURSOR_SUMMARIZE_PROMPT ? "/compact" : userText,
+            text: userText,
             revertToken: { messageId },
           });
           for (const hint of imageHintsOf(turn?.user)) {
@@ -1716,12 +1739,7 @@ function createConnection(
             state.turnSeq += 1;
             const messageId = `user:${state.turnSeq}`;
             state.userMessageIds.push(messageId);
-            push({
-              type: "user_message",
-              id: newId("user"),
-              text: text === CURSOR_SUMMARIZE_PROMPT ? "/compact" : text,
-              revertToken: { messageId },
-            });
+            push({ type: "user_message", id: newId("user"), text, revertToken: { messageId } });
           }
         }
         for (const step of turn?.steps ?? []) {

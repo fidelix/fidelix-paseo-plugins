@@ -125,6 +125,8 @@ export interface CursorAgent {
       onDelta?: (args: { update: CursorInteractionUpdate }) => void | Promise<void>;
     },
   ): Promise<CursorRun>;
+  /** Summarize the conversation to free context (CLI `/summarize`); local agents with a saved conversation only. */
+  summarize(): Promise<CursorRun>;
   close(): void;
   getUsage(options?: { runId?: string }): Promise<CursorAgentUsage>;
 }
@@ -157,7 +159,8 @@ export type CursorSDKMessage =
   | { type: "status"; agent_id: string; run_id: string; status: string; message?: string }
   | { type: "task"; agent_id: string; run_id: string; status?: string; text?: string }
   | { type: "request"; agent_id: string; run_id: string; request_id: string }
-  | { type: "usage"; agent_id: string; run_id: string; usage: CursorTokenUsage };
+  | { type: "usage"; agent_id: string; run_id: string; usage: CursorTokenUsage }
+  | { type: "summary"; agent_id: string; run_id: string; status: "running" | "completed" | "error"; fallback?: boolean };
 
 /**
  * Nested update from a running subagent (`task` tool), delivered through the
