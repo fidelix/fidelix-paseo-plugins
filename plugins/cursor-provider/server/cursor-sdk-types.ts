@@ -105,10 +105,23 @@ export interface CursorRun {
   stream(): AsyncGenerator<CursorSDKMessage, void>;
   wait(): Promise<CursorRunResult>;
   cancel(): Promise<void>;
-  steer?(text: string): Promise<"complete_delivered" | "revert_to_followup">;
+  steer?(text: string): Promise<CursorSteerOutcome>;
   conversation(): Promise<unknown>;
   readonly status: string;
 }
+
+export type CursorSteerOutcome =
+  | "complete_delivered"
+  | "revert_to_followup"
+  | { outcome: "queued"; run?: CursorRun };
+
+export type CursorConnectionState =
+  | { state: "connected" }
+  | {
+      state: "reconnecting";
+      attempt: number;
+      trigger?: { errorClass?: string; stallAborted?: boolean };
+    };
 
 export interface CursorAgent {
   readonly agentId: string;
@@ -117,12 +130,16 @@ export interface CursorAgent {
   // no `tools` field, so tool restrictions can only be set at Agent.create /
   // Agent.resume (which also do not persist them; every resume re-passes them).
   send(
-    message: string | { text: string; images?: Array<{ data: string; mimeType: string }> },
+    message:
+      | string
+      | { text: string; images?: Array<{ data: string; mimeType: string }> },
     options?: {
       model?: CursorModelSelection;
       mode?: "agent" | "plan";
       mcpServers?: Record<string, CursorMcpServerConfig>;
-      onDelta?: (args: { update: CursorInteractionUpdate }) => void | Promise<void>;
+      onDelta?: (args: {
+        update: CursorInteractionUpdate;
+      }) => void | Promise<void>;
     },
   ): Promise<CursorRun>;
   /** Summarize the conversation to free context (CLI `/summarize`); local agents with a saved conversation only. */
@@ -132,19 +149,49 @@ export interface CursorAgent {
 }
 
 export type CursorMcpServerConfig =
-  | { type?: "stdio"; command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
+  | {
+      type?: "stdio";
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+    }
   | { type?: "http" | "sse"; url: string; headers?: Record<string, string> };
 
 export type CursorSDKMessage =
-  | { type: "system"; agent_id: string; run_id: string; model?: CursorModelSelection; tools?: string[]; subtype?: string }
-  | { type: "user"; agent_id: string; run_id: string; message: { role: "user"; content: Array<{ type: "text"; text: string }> } }
+  | {
+      type: "system";
+      agent_id: string;
+      run_id: string;
+      model?: CursorModelSelection;
+      tools?: string[];
+      subtype?: string;
+    }
+  | {
+      type: "user";
+      agent_id: string;
+      run_id: string;
+      message: { role: "user"; content: Array<{ type: "text"; text: string }> };
+    }
   | {
       type: "assistant";
       agent_id: string;
       run_id: string;
-      message: { role: "assistant"; content: Array<{ type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown }> };
+      message: {
+        role: "assistant";
+        content: Array<
+          | { type: "text"; text: string }
+          | { type: "tool_use"; id: string; name: string; input: unknown }
+        >;
+      };
     }
-  | { type: "thinking"; agent_id: string; run_id: string; text: string; thinking_duration_ms?: number }
+  | {
+      type: "thinking";
+      agent_id: string;
+      run_id: string;
+      text: string;
+      thinking_duration_ms?: number;
+    }
   | {
       type: "tool_call";
       agent_id: string;
@@ -156,11 +203,29 @@ export type CursorSDKMessage =
       result?: unknown;
       truncated?: { args?: boolean; result?: boolean };
     }
-  | { type: "status"; agent_id: string; run_id: string; status: string; message?: string }
-  | { type: "task"; agent_id: string; run_id: string; status?: string; text?: string }
+  | {
+      type: "status";
+      agent_id: string;
+      run_id: string;
+      status: string;
+      message?: string;
+    }
+  | {
+      type: "task";
+      agent_id: string;
+      run_id: string;
+      status?: string;
+      text?: string;
+    }
   | { type: "request"; agent_id: string; run_id: string; request_id: string }
   | { type: "usage"; agent_id: string; run_id: string; usage: CursorTokenUsage }
-  | { type: "summary"; agent_id: string; run_id: string; status: "running" | "completed" | "error"; fallback?: boolean };
+  | {
+      type: "summary";
+      agent_id: string;
+      run_id: string;
+      status: "running" | "completed" | "error";
+      fallback?: boolean;
+    };
 
 /**
  * Nested update from a running subagent (`task` tool), delivered through the
@@ -181,7 +246,12 @@ export type CursorTaskUpdate =
   | { type: "step-started" | "step-completed" | "tool-requests-listed" };
 
 export type CursorInteractionUpdate =
-  | { type: "tool-call-delta"; callId: string; modelCallId?: string; taskUpdate: CursorTaskUpdate }
+  | {
+      type: "tool-call-delta";
+      callId: string;
+      modelCallId?: string;
+      taskUpdate: CursorTaskUpdate;
+    }
   | { type: string };
 
 export interface CursorAgentMessage {
@@ -204,7 +274,11 @@ export interface CursorAgentUsageCost {
 export interface CursorAgentUsage {
   usage: CursorTokenUsage;
   cost?: CursorAgentUsageCost;
-  runs: Array<{ runId: string; usage: CursorTokenUsage; cost?: CursorAgentUsageCost }>;
+  runs: Array<{
+    runId: string;
+    usage: CursorTokenUsage;
+    cost?: CursorAgentUsageCost;
+  }>;
 }
 
 export interface CursorSdkErrorShape {

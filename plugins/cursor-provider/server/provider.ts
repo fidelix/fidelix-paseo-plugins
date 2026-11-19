@@ -13,7 +13,9 @@ import type {
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { cursorSettings } from "../shared/settings.js";
 
-export type CursorPluginSettings = PluginSettings<(typeof cursorSettings)["schema"]>;
+export type CursorPluginSettings = PluginSettings<
+  (typeof cursorSettings)["schema"]
+>;
 
 import { z } from "zod";
 import { loadCursorSdk } from "./cursor-sdk-loader.js";
@@ -35,13 +37,17 @@ import {
 import type {
   CursorAgent,
   CursorAgentUsage,
+  CursorConnectionState,
   CursorInteractionUpdate,
   CursorModelListItem,
   CursorRun,
   CursorSDKMessage,
   CursorTaskUpdate,
 } from "./cursor-sdk-types.js";
-import type { ProviderTimelineItem, ProviderUsage } from "@getpaseo/plugin/server/provider";
+import type {
+  ProviderTimelineItem,
+  ProviderUsage,
+} from "@getpaseo/plugin/server/provider";
 import {
   discoverCursorSlashCatalog,
   fallbackSlashCatalog,
@@ -108,7 +114,10 @@ const CAPABILITIES = [
 ] as const;
 
 const persistenceSchema = z
-  .object({ version: z.literal(1), data: z.object({ agentId: z.string().min(1) }) })
+  .object({
+    version: z.literal(1),
+    data: z.object({ agentId: z.string().min(1) }),
+  })
   .strict();
 
 interface SessionState {
@@ -156,6 +165,8 @@ interface SessionState {
   compaction: CompactionState | null;
   /** Summarization Cursor started on its own inside a regular turn. */
   autoCompaction: CompactionState | null;
+  /** Open "reconnecting" notice for the active turn's transport retry. */
+  reconnect: { turnId: string; itemId: string; attempt: number } | null;
 }
 
 interface CompactionState {
@@ -209,12 +220,16 @@ async function readStoredApiKey(
 
 function storeRoot(config: Pick<ProviderSessionConfig, "env">): string {
   const base =
-    config.env["CURSOR_SDK_STATE_ROOT"] || process.env["CURSOR_SDK_STATE_ROOT"] || path.join(homedir(), ".cursor", "sdk");
+    config.env["CURSOR_SDK_STATE_ROOT"] ||
+    process.env["CURSOR_SDK_STATE_ROOT"] ||
+    path.join(homedir(), ".cursor", "sdk");
   return path.join(base, "paseo-plugin");
 }
 
 /** SQLite store for the session's workspace (see local-store.ts). */
-async function openStore(config: Pick<ProviderSessionConfig, "env" | "cwd">): Promise<CursorLocalAgentStore> {
+async function openStore(
+  config: Pick<ProviderSessionConfig, "env" | "cwd">,
+): Promise<CursorLocalAgentStore> {
   const root = storeRoot(config);
   try {
     return await openLocalStore(root, config.cwd);
@@ -226,7 +241,9 @@ async function openStore(config: Pick<ProviderSessionConfig, "env" | "cwd">): Pr
 }
 
 /** SQLite files sized in the diagnostics record of a turn that ends badly. */
-function diagnosticStoreFiles(state: SessionState): Record<string, string> | undefined {
+function diagnosticStoreFiles(
+  state: SessionState,
+): Record<string, string> | undefined {
   const agentId = state.agent?.agentId;
   if (!agentId) return undefined;
   const root = storeRoot(state.config);
@@ -246,14 +263,19 @@ function promptText(
   if (prompt.input.type === "command") {
     const entry = catalog.get(prompt.input.name);
     if (!entry) throw new Error(`Unknown Cursor command: ${prompt.input.name}`);
-    return { text: renderSlashPrompt(entry, prompt.input.arguments), images: [] };
+    return {
+      text: renderSlashPrompt(entry, prompt.input.arguments),
+      images: [],
+    };
   }
   const text: string[] = [];
   const images: Array<{ data: string; mimeType: string }> = [];
   for (const part of prompt.input.content) {
     if (part.type === "text") text.push(part.text);
-    else if (part.type === "image") images.push({ data: part.data, mimeType: part.mimeType });
-    else throw new Error("Cursor provider supports text and image content only");
+    else if (part.type === "image")
+      images.push({ data: part.data, mimeType: part.mimeType });
+    else
+      throw new Error("Cursor provider supports text and image content only");
   }
   return { text: text.join("\n"), images };
 }
@@ -262,12 +284,22 @@ function promptText(
  * `/compact` as the built-in command, or typed as the whole message (Paseo
  * sends it as text when the slash menu is not used).
  */
-function isCompactPrompt(prompt: ProviderPrompt, catalog: Map<string, CursorSlashEntry>): boolean {
+function isCompactPrompt(
+  prompt: ProviderPrompt,
+  catalog: Map<string, CursorSlashEntry>,
+): boolean {
   if (prompt.input.type === "command") {
-    return prompt.input.name === "compact" && catalog.get("compact")?.kind === "builtin";
+    return (
+      prompt.input.name === "compact" &&
+      catalog.get("compact")?.kind === "builtin"
+    );
   }
   const parts = prompt.input.content;
-  return parts.length === 1 && parts[0]?.type === "text" && parts[0].text.trim() === "/compact";
+  return (
+    parts.length === 1 &&
+    parts[0]?.type === "text" &&
+    parts[0].text.trim() === "/compact"
+  );
 }
 
 function promptLabel(prompt: ProviderPrompt): string {
@@ -310,11 +342,15 @@ export function createCursorProvider(options: ProviderOptions = {}): {
     settingsUnsubscribe?.();
     settingsUnsubscribe = null;
   }
-  let discoveredModels: { models: ProviderModel[]; raw: CursorModelListItem[] } | null = null;
+  let discoveredModels: {
+    models: ProviderModel[];
+    raw: CursorModelListItem[];
+  } | null = null;
   return {
     id: "cursor-sdk",
     label: "Cursor SDK",
-    description: "Cursor coding agent via the official Cursor SDK (local runtime)",
+    description:
+      "Cursor coding agent via the official Cursor SDK (local runtime)",
     icon: "icon.svg",
     async connect(request) {
       if (!request.versions.includes(1)) {
@@ -381,7 +417,10 @@ function createConnection(
   /** Last catalog failure logged, so a broken key does not spam every refresh. */
   let lastCatalogError: string | null = null;
   /** In-flight `Cursor.models.list` per API key (see fetchCatalog). */
-  const catalogFetches = new Map<string, Promise<{ models: ProviderModel[]; raw: CursorModelListItem[] }>>();
+  const catalogFetches = new Map<
+    string,
+    Promise<{ models: ProviderModel[]; raw: CursorModelListItem[] }>
+  >();
   /** When the last catalog fetch failed; fetches pause for CATALOG_RETRY_MS after. */
   let catalogFailedAt = 0;
 
@@ -404,10 +443,15 @@ function createConnection(
    * the daemon's 2s interrupt budget and surface as "cancellation was not
    * acknowledged".
    */
-  function cancelActiveTurn(state: SessionState, emitCanceled: boolean, reason: string): void {
+  function cancelActiveTurn(
+    state: SessionState,
+    emitCanceled: boolean,
+    reason: string,
+  ): void {
     const turnId = state.activeTurnId;
     const run = state.activeRun;
-    if (turnId) state.turnDiag?.note("cancel", { reason, hadRun: run !== null });
+    if (turnId)
+      state.turnDiag?.note("cancel", { reason, hadRun: run !== null });
     state.activeTurnId = null;
     state.activeRun = null;
     state.turnAbort?.abort();
@@ -420,7 +464,12 @@ function createConnection(
       state.cancelPending = state.sendPending.then(cancelRun, () => undefined);
     }
     if (emitCanceled && turnId) {
-      emit({ type: "session.turn", sessionId: state.id, turnId, state: "canceled" });
+      emit({
+        type: "session.turn",
+        sessionId: state.id,
+        turnId,
+        state: "canceled",
+      });
     }
   }
 
@@ -431,8 +480,9 @@ function createConnection(
   ): string {
     if (!modelId) return "default";
     return (
-      rawModels.find((item) => item.id === modelId || item.aliases?.includes(modelId))?.id ??
-      modelId
+      rawModels.find(
+        (item) => item.id === modelId || item.aliases?.includes(modelId),
+      )?.id ?? modelId
     );
   }
 
@@ -461,7 +511,11 @@ function createConnection(
    * to live-only rather than failing the request: the daemon still gets a
    * usable session list when the store is unreadable.
    */
-  async function listSessions(input: { query?: string; cwd?: string; limit?: number }): Promise<
+  async function listSessions(input: {
+    query?: string;
+    cwd?: string;
+    limit?: number;
+  }): Promise<
     Array<{
       persistence: ProviderPersistence;
       cwd: string;
@@ -495,7 +549,8 @@ function createConnection(
         ...(title ? { title } : {}),
       });
     }
-    if (input.limit !== undefined && out.length >= input.limit) return out.slice(0, input.limit);
+    if (input.limit !== undefined && out.length >= input.limit)
+      return out.slice(0, input.limit);
     try {
       const { Agent } = loadCursorSdk();
       // The daemon fans this request out per provider AND per cwd (the
@@ -506,7 +561,12 @@ function createConnection(
       // requires an exact cwd match (it returns none otherwise).
       const cwds = input.cwd
         ? [input.cwd]
-        : [...new Set([...[...sessions.values()].map((state) => state.config.cwd), safeCwd()])];
+        : [
+            ...new Set([
+              ...[...sessions.values()].map((state) => state.config.cwd),
+              safeCwd(),
+            ]),
+          ];
       // Agent.list is untyped on the loader (loader/types pattern only, no
       // static SDK imports), so cast to the structural list surface here.
       // Signature verified against agent.d.ts ListAgentsOptions/list return.
@@ -533,8 +593,10 @@ function createConnection(
         seen.add(item.agentId);
         const cwd = item.cwd ?? input.cwd ?? process.cwd();
         if (input.cwd && cwd !== input.cwd) continue;
-        const title = item.name && item.name !== "New Agent" ? item.name : undefined;
-        if (!matches(title) && !matches(item.summary) && !matches(item.agentId)) continue;
+        const title =
+          item.name && item.name !== "New Agent" ? item.name : undefined;
+        if (!matches(title) && !matches(item.summary) && !matches(item.agentId))
+          continue;
         out.push({
           persistence: { version: 1, data: { agentId: item.agentId } },
           cwd,
@@ -552,7 +614,9 @@ function createConnection(
     return out;
   }
 
-  async function readKey(config: ProviderSessionConfig): Promise<string | undefined> {
+  async function readKey(
+    config: ProviderSessionConfig,
+  ): Promise<string | undefined> {
     // Explicit overrides only. When nothing is configured, callers omit
     // apiKey so the SDK falls back to CURSOR_API_KEY / stored login itself.
     // (Daemon process env is NOT read here: explicit empty env would bypass
@@ -563,7 +627,10 @@ function createConnection(
     return readStoredApiKey(settings);
   }
 
-  function readCache(): { models: ProviderModel[]; raw: CursorModelListItem[] } | null {
+  function readCache(): {
+    models: ProviderModel[];
+    raw: CursorModelListItem[];
+  } | null {
     return invalidateCatalog.read();
   }
 
@@ -586,7 +653,11 @@ function createConnection(
     let pending = catalogFetches.get(key);
     if (!pending) {
       const { Cursor } = loadCursorSdk();
-      pending = (Cursor.models.list(apiKey ? { apiKey } : {}) as Promise<CursorModelListItem[]>)
+      pending = (
+        Cursor.models.list(apiKey ? { apiKey } : {}) as Promise<
+          CursorModelListItem[]
+        >
+      )
         .then((raw) => {
           catalogFailedAt = 0;
           lastCatalogError = null;
@@ -604,7 +675,9 @@ function createConnection(
   }
 
   function catalogCoolingDown(): boolean {
-    return catalogFailedAt > 0 && Date.now() - catalogFailedAt < CATALOG_RETRY_MS;
+    return (
+      catalogFailedAt > 0 && Date.now() - catalogFailedAt < CATALOG_RETRY_MS
+    );
   }
 
   /** Log the real reason once per distinct failure (a bad key looks like a one-model catalog). */
@@ -661,7 +734,8 @@ function createConnection(
         // Same fallback as ensureCatalog: explicit key when configured,
         // otherwise let the SDK use CURSOR_API_KEY / stored login itself.
         // No key anywhere just fails the list call, which falls back below.
-        const apiKey = (await readStoredApiKey(settings)) ?? readProcessApiKey();
+        const apiKey =
+          (await readStoredApiKey(settings)) ?? readProcessApiKey();
         const cached = readCache();
         if (catalogCoolingDown()) {
           emit({
@@ -673,7 +747,11 @@ function createConnection(
         }
         try {
           const fresh = await fetchCatalog(apiKey);
-          emit({ type: "catalog", requestId: input.requestId, catalog: toCatalog(fresh.models) });
+          emit({
+            type: "catalog",
+            requestId: input.requestId,
+            catalog: toCatalog(fresh.models),
+          });
         } catch {
           emit({
             type: "catalog",
@@ -699,7 +777,10 @@ function createConnection(
         const settings = { ...(input.config.settings ?? {}) };
         const state: SessionState = {
           id: input.sessionId,
-          config: { ...input.config, mode: resolveCursorMode(input.config.mode, settings) },
+          config: {
+            ...input.config,
+            mode: resolveCursorMode(input.config.mode, settings),
+          },
           model: input.config.model,
           settings,
           models,
@@ -709,7 +790,10 @@ function createConnection(
           // turn, not only after a configure round-trip.
           thinkingSelections:
             input.config.thinkingOption !== undefined
-              ? { [canonicalKey(raw, input.config.model)]: input.config.thinkingOption }
+              ? {
+                  [canonicalKey(raw, input.config.model)]:
+                    input.config.thinkingOption,
+                }
               : {},
           agent: null,
           runtimeAutoReview: false,
@@ -727,10 +811,16 @@ function createConnection(
           turnDiag: null,
           compaction: null,
           autoCompaction: null,
+          reconnect: null,
         };
         sessions.set(input.sessionId, state);
         try {
-          await openSession(state, state.config, input.persistence, input.requestId);
+          await openSession(
+            state,
+            state.config,
+            input.persistence,
+            input.requestId,
+          );
         } catch (error) {
           sessions.delete(input.sessionId);
           await closeAgent(state).catch(() => undefined);
@@ -746,7 +836,9 @@ function createConnection(
         // `session.prompt_result`, and the daemon timed out with "run did not
         // start within 60 seconds". `runPrompt` emits the start result
         // synchronously; its failures are reported through turn/prompt events.
-        void runPrompt(state, input.prompt).catch((error) => failed(input, error));
+        void runPrompt(state, input.prompt).catch((error) =>
+          failed(input, error),
+        );
         return;
       }
       case "session.configure": {
@@ -808,11 +900,19 @@ function createConnection(
         result: { type: "failed", error: providerError },
       });
     } else if ("requestId" in input) {
-      emit({ type: "request.failed", requestId: input.requestId, error: providerError });
+      emit({
+        type: "request.failed",
+        requestId: input.requestId,
+        error: providerError,
+      });
     }
   }
 
-  function resolveModelSelection(state: SessionState): { id: string } | { id: string; params: Array<{ id: string; value: string }> } {
+  function resolveModelSelection(
+    state: SessionState,
+  ):
+    | { id: string }
+    | { id: string; params: Array<{ id: string; value: string }> } {
     const modelId = state.model ?? DEFAULT_CURSOR_MODEL;
     const resolved = resolveCursorModelParams({
       modelId: state.model,
@@ -831,7 +931,9 @@ function createConnection(
    * every create/resume. Returns undefined for the SDK default toolset.
    * Documented in mapping.resolveCursorTools.
    */
-  function sessionTools(state: SessionState): ["mcp"] | ["read", "grep", "glob", "ls"] | undefined {
+  function sessionTools(
+    state: SessionState,
+  ): ["mcp"] | ["read", "grep", "glob", "ls"] | undefined {
     return resolveCursorTools({
       toolPolicy: state.config.toolPolicy,
       mode: state.config.mode,
@@ -850,8 +952,15 @@ function createConnection(
       ...(apiKey ? { apiKey } : {}),
       model: resolveModelSelection(state),
       ...(tools ? { tools } : {}),
-      ...(usesPaseoDelegation(state.config) ? { disallowedTools: ["task"] } : {}),
-      local: cursorLocalOptions(state.config, store, isAutoReviewMode(state.config.mode)),
+      ...(usesPaseoDelegation(state.config)
+        ? { disallowedTools: ["task"] }
+        : {}),
+      local: cursorLocalOptions(
+        state.config,
+        store,
+        isAutoReviewMode(state.config.mode),
+        (change) => acceptConnectionState(state, change),
+      ),
     })) as CursorAgent;
   }
 
@@ -895,17 +1004,30 @@ function createConnection(
             ...(apiKey ? { apiKey } : {}),
             model: resolveModelSelection(state),
             ...(tools ? { tools } : {}),
-            ...(usesPaseoDelegation(config) ? { disallowedTools: ["task"] } : {}),
-            local: cursorLocalOptions(config, store, autoReview),
-            ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+            ...(usesPaseoDelegation(config)
+              ? { disallowedTools: ["task"] }
+              : {}),
+            local: cursorLocalOptions(config, store, autoReview, (change) =>
+              acceptConnectionState(state, change),
+            ),
+            ...(config.systemPrompt
+              ? { systemPrompt: config.systemPrompt }
+              : {}),
             mcpServers: toMcpServers(config),
           })
     ) as CursorAgent;
     state.agent = agent;
     state.runtimeAutoReview = autoReview;
     if (config.persist) {
-      const value = { version: 1, data: { agentId: agent.agentId } } as ProviderPersistence;
-      emit({ type: "session.persistence", sessionId: state.id, persistence: value });
+      const value = {
+        version: 1,
+        data: { agentId: agent.agentId },
+      } as ProviderPersistence;
+      emit({
+        type: "session.persistence",
+        sessionId: state.id,
+        persistence: value,
+      });
     }
     emit({
       type: "session.opened",
@@ -914,7 +1036,12 @@ function createConnection(
       capabilities: [...CAPABILITIES],
       restoration: "core",
       ...(config.persist
-        ? { persistence: { version: 1, data: { agentId: agent.agentId } } as ProviderPersistence }
+        ? {
+            persistence: {
+              version: 1,
+              data: { agentId: agent.agentId },
+            } as ProviderPersistence,
+          }
         : {}),
       cwd: config.cwd,
       ...(config.title ? { title: config.title } : {}),
@@ -933,7 +1060,9 @@ function createConnection(
       );
       slashEntries = fallbackSlashCatalog();
     }
-    state.slashCatalog = new Map(slashEntries.map((entry) => [entry.name, entry]));
+    state.slashCatalog = new Map(
+      slashEntries.map((entry) => [entry.name, entry]),
+    );
     emit({
       type: "session.commands",
       sessionId: state.id,
@@ -952,23 +1081,32 @@ function createConnection(
    * that crashed or reloaded; left alone, every send fails with
    * "Agent … already has active run".
    */
-  async function settleOrphan(store: CursorLocalAgentStore, agentId: string): Promise<void> {
+  async function settleOrphan(
+    store: CursorLocalAgentStore,
+    agentId: string,
+  ): Promise<void> {
     if (hasLiveRun(agentId)) return;
     const settled = await settleOrphanedRun(store, agentId);
     if (settled) {
-      console.error(`cursor-sdk provider: cancelled orphaned run ${settled} of ${agentId}`);
+      console.error(
+        `cursor-sdk provider: cancelled orphaned run ${settled} of ${agentId}`,
+      );
     }
   }
 
   function hasLiveRun(agentId: string): boolean {
     for (const other of sessions.values()) {
       if (other.agent?.agentId !== agentId) continue;
-      if (other.activeRun || other.sendPending || other.cancelPending) return true;
+      if (other.activeRun || other.sendPending || other.cancelPending)
+        return true;
     }
     return false;
   }
 
-  function applyConfigure(state: SessionState, changes: ProviderConfigChanges): void {
+  function applyConfigure(
+    state: SessionState,
+    changes: ProviderConfigChanges,
+  ): void {
     if (changes.model !== undefined) {
       // Model switches apply on the next prompt; the SDK resolves per-send.
       // Re-key the thinking dropdown to the new model (stored selection if
@@ -976,7 +1114,10 @@ function createConnection(
       // model never leaks into params or selection.
       state.model = changes.model ?? undefined;
     }
-    if (changes.thinkingOption !== undefined && changes.thinkingOption !== null) {
+    if (
+      changes.thinkingOption !== undefined &&
+      changes.thinkingOption !== null
+    ) {
       // Thinking ids are thinking-param *values* (low/medium/high/…) for the
       // current model; resolveThinkingParam throws for unknown ids. Stored
       // per raw model id so switching models keeps each model's own value.
@@ -985,14 +1126,23 @@ function createConnection(
         modelId: state.model,
         rawModels: state.rawModels,
       });
-      const key = findRawModel(state.rawModels, state.model)?.id ?? state.model ?? "default";
+      const key =
+        findRawModel(state.rawModels, state.model)?.id ??
+        state.model ??
+        "default";
       state.thinkingSelections[key] = value;
     }
     if (changes.thinkingOption === null) {
-      const key = findRawModel(state.rawModels, state.model)?.id ?? state.model ?? "default";
+      const key =
+        findRawModel(state.rawModels, state.model)?.id ??
+        state.model ??
+        "default";
       delete state.thinkingSelections[key];
     }
-    applySettings(state.settings, changes.settings as Record<string, unknown> | undefined);
+    applySettings(
+      state.settings,
+      changes.settings as Record<string, unknown> | undefined,
+    );
     if (changes.mode !== undefined) {
       // An Auto-review/Bypass switch takes effect on the next prompt, which
       // reopens the runtime (see syncReviewRuntime).
@@ -1009,7 +1159,9 @@ function createConnection(
   }
 
   /** Emit the current session config: selected model, its thinking value, per-model dropdown, settings. */
-  function currentConfig(state: SessionState): Parameters<typeof publishableConfig>[0] {
+  function currentConfig(
+    state: SessionState,
+  ): Parameters<typeof publishableConfig>[0] {
     return {
       model: state.model,
       mode: state.config.mode,
@@ -1025,25 +1177,37 @@ function createConnection(
     };
   }
 
-  async function runPrompt(state: SessionState, prompt: ProviderPrompt): Promise<void> {
+  async function runPrompt(
+    state: SessionState,
+    prompt: ProviderPrompt,
+  ): Promise<void> {
     if (!state.agent) throw new Error("Cursor session is not open");
     adoptCatalog(state);
-    if (prompt.input.type === "command" && !state.slashCatalog.has(prompt.input.name)) {
+    if (
+      prompt.input.type === "command" &&
+      !state.slashCatalog.has(prompt.input.name)
+    ) {
       emit({
         type: "session.prompt_result",
         sessionId: state.id,
         clientMessageId: prompt.clientMessageId,
-        result: { type: "failed", error: { message: `Unknown Cursor command: ${prompt.input.name}` } },
+        result: {
+          type: "failed",
+          error: { message: `Unknown Cursor command: ${prompt.input.name}` },
+        },
       });
       return;
     }
     const compact = isCompactPrompt(prompt, state.slashCatalog);
     if (state.activeTurnId) {
       if (prompt.delivery === "steer" && !compact) {
-        const outcome = await state.activeRun?.steer?.(promptText(prompt, state.slashCatalog).text).catch(
-          () => undefined,
-        );
-        if (outcome === "complete_delivered" && state.activeTurnId) {
+        const outcome = await state.activeRun
+          ?.steer?.(promptText(prompt, state.slashCatalog).text)
+          .catch(() => undefined);
+        const delivered =
+          outcome === "complete_delivered" ||
+          (typeof outcome === "object" && outcome.outcome === "queued");
+        if (delivered && state.activeTurnId) {
           emit({
             type: "session.prompt_result",
             sessionId: state.id,
@@ -1053,24 +1217,34 @@ function createConnection(
           return;
         }
       }
-      throw new Error("Cursor already has an active turn; wait for it to finish");
+      throw new Error(
+        "Cursor already has an active turn; wait for it to finish",
+      );
     }
     if (prompt.delivery === "steer") {
       emit({
         type: "session.prompt_result",
         sessionId: state.id,
         clientMessageId: prompt.clientMessageId,
-        result: { type: "failed", error: { message: "There is no active turn to steer" } },
+        result: {
+          type: "failed",
+          error: { message: "There is no active turn to steer" },
+        },
       });
       return;
     }
-    const { text, images } = compact ? { text: "", images: [] } : promptText(prompt, state.slashCatalog);
+    const { text, images } = compact
+      ? { text: "", images: [] }
+      : promptText(prompt, state.slashCatalog);
     const turnId = newId("turn");
     const turnAbort = new AbortController();
     state.activeTurnId = turnId;
     state.turnAbort = turnAbort;
-    state.compaction = compact ? { turnId, itemId: null, completed: false } : null;
+    state.compaction = compact
+      ? { turnId, itemId: null, completed: false }
+      : null;
     state.autoCompaction = null;
+    state.reconnect = null;
     state.turnSeq += 1;
     const messageId = `user:${state.turnSeq}`;
     emit({
@@ -1079,14 +1253,23 @@ function createConnection(
       clientMessageId: prompt.clientMessageId,
       result: { type: "turn", turnId },
     });
-    emit({ type: "session.turn", sessionId: state.id, turnId, state: "started" });
+    emit({
+      type: "session.turn",
+      sessionId: state.id,
+      turnId,
+      state: "started",
+    });
     emit({
       type: "timeline.item",
       sessionId: state.id,
       item: {
         type: "user_message",
         id: messageId,
-        text: compact ? "/compact" : prompt.input.type === "command" ? promptLabel(prompt) : text,
+        text: compact
+          ? "/compact"
+          : prompt.input.type === "command"
+            ? promptLabel(prompt)
+            : text,
         clientMessageId: prompt.clientMessageId,
         revertToken: { messageId },
       },
@@ -1103,8 +1286,15 @@ function createConnection(
     let outcome: TurnOutcome = { status: "canceled" };
     try {
       await syncReviewRuntime(state);
-      const result = await sendWithRetry(state, compact ? null : { text, images }, turnId, turnAbort.signal, turnDiag);
-      if (result.status === "error") outcome = { status: "failed", error: result.error };
+      const result = await sendWithRetry(
+        state,
+        compact ? null : { text, images },
+        turnId,
+        turnAbort.signal,
+        turnDiag,
+      );
+      if (result.status === "error")
+        outcome = { status: "failed", error: result.error };
       // An interrupt already settled this turn (cleared activeTurnId and
       // emitted `canceled`); never overwrite a newer turn's state.
       if (state.activeTurnId !== turnId) {
@@ -1115,7 +1305,12 @@ function createConnection(
       state.activeRun = null;
       state.turnAbort = null;
       if (result.status === "cancelled") {
-        emit({ type: "session.turn", sessionId: state.id, turnId, state: "canceled" });
+        emit({
+          type: "session.turn",
+          sessionId: state.id,
+          turnId,
+          state: "canceled",
+        });
         return;
       }
       if (result.status === "error") {
@@ -1137,14 +1332,23 @@ function createConnection(
             type: "notification",
             id: newId("compaction-missing"),
             level: "warning",
-            message: "Cursor finished the compaction run without reporting a summary.",
+            message:
+              "Cursor finished the compaction run without reporting a summary.",
           },
         });
       }
-      emit({ type: "session.turn", sessionId: state.id, turnId, state: "completed" });
+      emit({
+        type: "session.turn",
+        sessionId: state.id,
+        turnId,
+        state: "completed",
+      });
     } catch (error) {
       const failure = toProviderError(error);
-      outcome = { status: state.activeTurnId === turnId ? "failed" : "canceled", error: failure };
+      outcome = {
+        status: state.activeTurnId === turnId ? "failed" : "canceled",
+        error: failure,
+      };
       if (state.activeTurnId !== turnId) return;
       state.activeTurnId = null;
       state.activeRun = null;
@@ -1180,34 +1384,43 @@ function createConnection(
   async function sendWithRetry(
     state: SessionState,
     /** `null` summarizes the conversation (`/compact`) instead of sending. */
-    message: { text: string; images: Array<{ data: string; mimeType: string }> } | null,
+    message: {
+      text: string;
+      images: Array<{ data: string; mimeType: string }>;
+    } | null,
     turnId: string,
     signal: AbortSignal,
     turnDiag: TurnDiagnostics,
   ): Promise<
-    { status: "finished" | "cancelled" } | { status: "error"; error: { message: string; code?: string } }
+    | { status: "finished" | "cancelled" }
+    | { status: "error"; error: { message: string; code?: string } }
   > {
     let attempt = 0;
     for (;;) {
-      if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
+      if (state.activeTurnId !== turnId || signal.aborted)
+        return { status: "cancelled" };
       attempt += 1;
       turnDiag.attempt(attempt);
       const delivery = { usage: false };
       try {
         await waitForPriorCancel(state);
-        if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
+        if (state.activeTurnId !== turnId || signal.aborted)
+          return { status: "cancelled" };
         const sending = (
           message === null
             ? state.agent!.summarize()
-            : state.agent!.send(message.images.length > 0 ? message : message.text, {
-                model: resolveModelSelection(state),
-                mode: toAgentMode(state.config.mode),
-                mcpServers: toMcpServers(state.config),
-                onDelta: ({ update }) => {
-                  turnDiag.delta(update.type);
-                  acceptDelta(state, turnId, update);
+            : state.agent!.send(
+                message.images.length > 0 ? message : message.text,
+                {
+                  model: resolveModelSelection(state),
+                  mode: toAgentMode(state.config.mode),
+                  mcpServers: toMcpServers(state.config),
+                  onDelta: ({ update }) => {
+                    turnDiag.delta(update.type);
+                    acceptDelta(state, turnId, update);
+                  },
                 },
-              })
+              )
         ) as Promise<CursorRun>;
         state.sendPending = sending;
         let run: CursorRun;
@@ -1231,7 +1444,9 @@ function createConnection(
             attempt,
             runId: run.id,
             status: result.status,
-            ...(result.error ? { error: result.error.message, code: result.error.code } : {}),
+            ...(result.error
+              ? { error: result.error.message, code: result.error.code }
+              : {}),
           });
         }
         if (state.activeTurnId !== turnId) return { status: "cancelled" };
@@ -1245,7 +1460,11 @@ function createConnection(
         // The answer already arrived (`usage` is the SDK's turnEnded). A
         // following error is the checkpoint/resume race, not a missing reply.
         if (delivery.usage) {
-          turnDiag.note("error_after_answer", { attempt, error: result.error?.message, code: result.error?.code });
+          turnDiag.note("error_after_answer", {
+            attempt,
+            error: result.error?.message,
+            code: result.error?.code,
+          });
           return { status: "finished" };
         }
         const classified = classifyCursorError(
@@ -1255,7 +1474,11 @@ function createConnection(
         );
         if (classified.retryable && attempt < retry.maxAttempts) {
           state.activeRun = null;
-          turnDiag.note("plugin_retry", { attempt, error: classified.message, code: classified.code });
+          turnDiag.note("plugin_retry", {
+            attempt,
+            error: classified.message,
+            code: classified.code,
+          });
           emitRetryNotice(state, turnId, attempt, classified.message);
           try {
             await sleep(retryDelayMs(attempt, retry), signal);
@@ -1265,17 +1488,28 @@ function createConnection(
           }
           continue;
         }
-        return { status: "error", error: { message: classified.message, code: classified.code } };
+        return {
+          status: "error",
+          error: { message: classified.message, code: classified.code },
+        };
       } catch (error) {
         turnDiag.note("send_threw", { attempt, error: describeError(error) });
-        if (state.activeTurnId !== turnId || signal.aborted) return { status: "cancelled" };
+        if (state.activeTurnId !== turnId || signal.aborted)
+          return { status: "cancelled" };
         if (delivery.usage) {
-          turnDiag.note("error_after_answer", { attempt, error: describeError(error) });
+          turnDiag.note("error_after_answer", {
+            attempt,
+            error: describeError(error),
+          });
           return { status: "finished" };
         }
         const classified = classifyCursorError(error);
         if (classified.retryable && attempt < retry.maxAttempts) {
-          turnDiag.note("plugin_retry", { attempt, error: classified.message, code: classified.code });
+          turnDiag.note("plugin_retry", {
+            attempt,
+            error: classified.message,
+            code: classified.code,
+          });
           emitRetryNotice(state, turnId, attempt, classified.message);
           try {
             await sleep(retryDelayMs(attempt, retry), signal);
@@ -1314,11 +1548,14 @@ function createConnection(
    * consistent and may lag right after a run, so absence is normal and never
    * fails the turn. Emits nothing when there is neither usage nor cost.
    */
-  async function readTurnCostUsd(state: SessionState): Promise<number | undefined> {
+  async function readTurnCostUsd(
+    state: SessionState,
+  ): Promise<number | undefined> {
     try {
       const agent = state.agent;
       if (!agent) return undefined;
-      const billed = (await agent.getUsage()) as CursorAgentUsage | null | undefined;
+      const billed = (await agent.getUsage()) as
+        CursorAgentUsage | null | undefined;
       const cost = billed?.cost;
       const cents =
         cost && typeof cost.chargedCents === "number"
@@ -1326,7 +1563,9 @@ function createConnection(
           : cost && typeof cost.rawCostCents === "number"
             ? cost.rawCostCents
             : undefined;
-      return typeof cents === "number" && Number.isFinite(cents) ? cents / 100 : undefined;
+      return typeof cents === "number" && Number.isFinite(cents)
+        ? cents / 100
+        : undefined;
     } catch {
       return undefined;
     }
@@ -1340,10 +1579,15 @@ function createConnection(
   async function contextUsage(
     state: SessionState,
     runId?: string,
-  ): Promise<Pick<ProviderUsage, "contextWindowMaxTokens" | "contextWindowUsedTokens">> {
+  ): Promise<
+    Pick<ProviderUsage, "contextWindowMaxTokens" | "contextWindowUsedTokens">
+  > {
     const window = await loadContextWindow(state, runId);
     if (!window) return {};
-    return { contextWindowMaxTokens: window.maxTokens, contextWindowUsedTokens: window.usedTokens };
+    return {
+      contextWindowMaxTokens: window.maxTokens,
+      contextWindowUsedTokens: window.usedTokens,
+    };
   }
 
   async function emitContextWindow(state: SessionState): Promise<void> {
@@ -1391,12 +1635,22 @@ function createConnection(
       }
       if (event.type === "usage") {
         delivery.usage = true;
-        emit({ type: "session.usage", sessionId: state.id, turnId, usage: toUsage(event.usage) });
+        emit({
+          type: "session.usage",
+          sessionId: state.id,
+          turnId,
+          usage: toUsage(event.usage),
+        });
         continue;
       }
       // `usage` is turnEnded. Anything the SDK streams after that is a resume
       // rewriting the answer that already finished; appending it is the repeat.
-      if (delivery.usage && (event.type === "assistant" || event.type === "thinking" || event.type === "status")) {
+      if (
+        delivery.usage &&
+        (event.type === "assistant" ||
+          event.type === "thinking" ||
+          event.type === "status")
+      ) {
         continue;
       }
       if (event.type === "assistant") {
@@ -1421,7 +1675,9 @@ function createConnection(
       }
       const item = toTimelineItem(event, {
         itemId:
-          event.type === "tool_call" ? (toolItems.get(event.call_id) ?? newId("tool")) : newId("item"),
+          event.type === "tool_call"
+            ? (toolItems.get(event.call_id) ?? newId("tool"))
+            : newId("item"),
       });
       if (event.type === "tool_call" && item) {
         toolItems.set(event.call_id, item.id);
@@ -1444,10 +1700,17 @@ function createConnection(
    * tool calls only here (run.stream() carries just the parent's `task` card).
    * Runs inline on the SDK's delta path, so it must stay synchronous and cheap.
    */
-  function acceptDelta(state: SessionState, turnId: string, update: CursorInteractionUpdate): void {
+  function acceptDelta(
+    state: SessionState,
+    turnId: string,
+    update: CursorInteractionUpdate,
+  ): void {
     if (state.closed || state.activeTurnId !== turnId) return;
     if (update.type !== "tool-call-delta") return;
-    const { callId, taskUpdate } = update as Extract<CursorInteractionUpdate, { type: "tool-call-delta" }>;
+    const { callId, taskUpdate } = update as Extract<
+      CursorInteractionUpdate,
+      { type: "tool-call-delta" }
+    >;
     const childId = state.taskChildren.get(callId);
     if (childId) {
       applyTaskUpdate(childId, taskUpdate);
@@ -1463,6 +1726,59 @@ function createConnection(
   }
 
   /**
+   * The SDK's transport retry is silent on the message stream. Surface it as
+   * one notice per outage, rewritten in place from "reconnecting" to
+   * "reconnected", so a stalled turn reads as a dropped connection.
+   */
+  function acceptConnectionState(
+    state: SessionState,
+    change: CursorConnectionState,
+  ): void {
+    const turnId = state.activeTurnId;
+    state.turnDiag?.note("connection", {
+      state: change.state,
+      ...(change.state === "reconnecting"
+        ? {
+            attempt: change.attempt,
+            ...(change.trigger?.errorClass
+              ? { errorClass: change.trigger.errorClass }
+              : {}),
+            ...(change.trigger?.stallAborted ? { stallAborted: true } : {}),
+          }
+        : {}),
+    });
+    if (state.closed || !turnId) return;
+    if (change.state === "reconnecting") {
+      if (state.reconnect?.turnId !== turnId)
+        state.reconnect = { turnId, itemId: newId("reconnect"), attempt: 0 };
+      state.reconnect.attempt = change.attempt;
+      emit({
+        type: "timeline.item",
+        sessionId: state.id,
+        item: {
+          type: "notification",
+          id: state.reconnect.itemId,
+          level: "warning",
+          message: `Cursor connection dropped; reconnecting (attempt ${change.attempt})…`,
+        },
+      });
+      return;
+    }
+    if (state.reconnect?.turnId !== turnId) return;
+    emit({
+      type: "timeline.item",
+      sessionId: state.id,
+      item: {
+        type: "notification",
+        id: state.reconnect.itemId,
+        level: "info",
+        message: `Reconnected to Cursor (attempt ${state.reconnect.attempt}).`,
+      },
+    });
+    state.reconnect = null;
+  }
+
+  /**
    * `summary` stream messages: Cursor summarizes on `/compact` and on its own
    * when the context fills. `error` leaves the conversation unchanged.
    */
@@ -1472,7 +1788,9 @@ function createConnection(
     event: { status: "running" | "completed" | "error"; fallback?: boolean },
   ): void {
     const manual = state.compaction?.turnId === turnId;
-    const compaction = manual ? state.compaction! : (state.autoCompaction ??= { turnId, itemId: null, completed: false });
+    const compaction = manual
+      ? state.compaction!
+      : (state.autoCompaction ??= { turnId, itemId: null, completed: false });
     compaction.itemId ??= newId("compaction");
     if (event.status === "error") {
       compaction.completed = true;
@@ -1506,7 +1824,8 @@ function createConnection(
             type: "notification",
             id: newId("compaction-fallback"),
             level: "warning",
-            message: "Summarized from a trimmed transcript: long messages may be cut short.",
+            message:
+              "Summarized from a trimmed transcript: long messages may be cut short.",
           },
         });
       }
@@ -1524,7 +1843,12 @@ function createConnection(
       emit({
         type: "timeline.item",
         sessionId: childId,
-        item: { type: "assistant_message", id: child.text.id, messageId: child.text.id, text: child.text.value },
+        item: {
+          type: "assistant_message",
+          id: child.text.id,
+          messageId: child.text.id,
+          text: child.text.value,
+        },
       });
       return;
     }
@@ -1534,7 +1858,11 @@ function createConnection(
       emit({
         type: "timeline.item",
         sessionId: childId,
-        item: { type: "reasoning", id: child.reasoning.id, text: child.reasoning.value },
+        item: {
+          type: "reasoning",
+          id: child.reasoning.id,
+          text: child.reasoning.value,
+        },
       });
       return;
     }
@@ -1602,7 +1930,9 @@ function createConnection(
       // Rewrite the parent tool card with the child link once the child exists.
       const subAgentDetail = {
         type: "sub_agent" as const,
-        ...(taskArgs.subagentType ? { subAgentType: taskArgs.subagentType } : {}),
+        ...(taskArgs.subagentType
+          ? { subAgentType: taskArgs.subagentType }
+          : {}),
         ...(taskArgs.description ? { description: taskArgs.description } : {}),
         childSessionId: childId,
         log: "",
@@ -1646,7 +1976,10 @@ function createConnection(
       for (const update of pending ?? []) applyTaskUpdate(childId, update);
       return;
     }
-    appendChildLog(childId, describeTaskResult(event.result, event.status === "error"));
+    appendChildLog(
+      childId,
+      describeTaskResult(event.result, event.status === "error"),
+    );
     finishChild(childId, event.status === "error" ? "failed" : "completed");
   }
 
@@ -1661,7 +1994,8 @@ function createConnection(
         type: "notification",
         id: newId("child-end"),
         level: status === "completed" ? "info" : "error",
-        message: status === "completed" ? "Subagent finished" : "Subagent failed",
+        message:
+          status === "completed" ? "Subagent finished" : "Subagent failed",
       },
     });
     children.delete(childId);
@@ -1693,7 +2027,9 @@ function createConnection(
     const agentId = state.agent?.agentId;
     if (!agentId) return;
     try {
-      if (!(await historyReplayAllowed(storeRoot(config), config.cwd, agentId))) {
+      if (
+        !(await historyReplayAllowed(storeRoot(config), config.cwd, agentId))
+      ) {
         console.error(
           `cursor-sdk provider: skipped history replay for ${agentId}; agent store is larger than ${HISTORY_REPLAY_MAX_STORE_BYTES} bytes`,
         );
@@ -1730,7 +2066,11 @@ function createConnection(
             revertToken: { messageId },
           });
           for (const hint of imageHintsOf(turn?.user)) {
-            push({ type: "assistant_message", id: newId("image-hint"), text: hint });
+            push({
+              type: "assistant_message",
+              id: newId("image-hint"),
+              text: hint,
+            });
           }
         } else {
           // Legacy shape: bare { text } user envelope.
@@ -1739,7 +2079,12 @@ function createConnection(
             state.turnSeq += 1;
             const messageId = `user:${state.turnSeq}`;
             state.userMessageIds.push(messageId);
-            push({ type: "user_message", id: newId("user"), text, revertToken: { messageId } });
+            push({
+              type: "user_message",
+              id: newId("user"),
+              text,
+              revertToken: { messageId },
+            });
           }
         }
         for (const step of turn?.steps ?? []) {
@@ -1750,7 +2095,8 @@ function createConnection(
         // Legacy shape: bare-text assistant envelope without turn structure.
         if (!turn && message.type !== "user") {
           const text = readMessageText(message.message);
-          if (text) push({ type: "assistant_message", id: newId("history"), text });
+          if (text)
+            push({ type: "assistant_message", id: newId("history"), text });
         }
       }
       for (const item of rows.slice(-20)) {
@@ -1763,7 +2109,8 @@ function createConnection(
 
   async function closeAgent(state: SessionState): Promise<void> {
     try {
-      const agent = state.agent as (CursorAgent & { [Symbol.asyncDispose]?: () => Promise<void> }) | null;
+      const agent = state.agent as
+        (CursorAgent & { [Symbol.asyncDispose]?: () => Promise<void> }) | null;
       await agent?.[Symbol.asyncDispose]?.();
     } catch {
       state.agent?.close();
@@ -1777,32 +2124,49 @@ function createConnection(
    * run.conversation() returns flat SDK-shape steps. Both are accepted
    * defensively — unknown shapes yield no rows rather than throwing.
    */
-  function turnOf(message: unknown): { user: unknown; steps: unknown[] } | null {
-    if (message === null || typeof message !== "object" || Array.isArray(message)) return null;
+  function turnOf(
+    message: unknown,
+  ): { user: unknown; steps: unknown[] } | null {
+    if (
+      message === null ||
+      typeof message !== "object" ||
+      Array.isArray(message)
+    )
+      return null;
     const record = message as Record<string, unknown>;
     const nested =
-      (record["agentConversationTurn"] as Record<string, unknown> | undefined) ??
+      (record["agentConversationTurn"] as
+        Record<string, unknown> | undefined) ??
       (record["turn"] as Record<string, unknown> | undefined);
     const turn =
       nested !== null && typeof nested === "object" && !Array.isArray(nested)
         ? ((nested["value"] as Record<string, unknown> | undefined) ?? nested)
         : undefined;
     if (!turn || typeof turn !== "object" || Array.isArray(turn)) return null;
-    const steps = Array.isArray(turn["steps"]) ? (turn["steps"] as unknown[]) : [];
+    const steps = Array.isArray(turn["steps"])
+      ? (turn["steps"] as unknown[])
+      : [];
     return { user: turn["userMessage"], steps };
   }
 
   function userTextOf(user: unknown): string | null {
-    if (user === null || typeof user !== "object" || Array.isArray(user)) return null;
+    if (user === null || typeof user !== "object" || Array.isArray(user))
+      return null;
     const text = Reflect.get(user, "text");
     return typeof text === "string" && text.length > 0 ? text : null;
   }
 
   /** Image attachments on a stored user message surface as text path hints. */
   function imageHintsOf(user: unknown): string[] {
-    if (user === null || typeof user !== "object" || Array.isArray(user)) return [];
+    if (user === null || typeof user !== "object" || Array.isArray(user))
+      return [];
     const context = Reflect.get(user, "selectedContext");
-    if (context === null || typeof context !== "object" || Array.isArray(context)) return [];
+    if (
+      context === null ||
+      typeof context !== "object" ||
+      Array.isArray(context)
+    )
+      return [];
     const images = Reflect.get(context, "selectedImages");
     if (!Array.isArray(images)) return [];
     const hints: string[] = [];
@@ -1811,7 +2175,11 @@ function createConnection(
         hints.push(`[image: ${image}]`);
         continue;
       }
-      if (image !== null && typeof image === "object" && !Array.isArray(image)) {
+      if (
+        image !== null &&
+        typeof image === "object" &&
+        !Array.isArray(image)
+      ) {
         const record = image as Record<string, unknown>;
         const path =
           (typeof record["path"] === "string" && record["path"]) ||
@@ -1840,12 +2208,15 @@ function createConnection(
     input: Extract<ProviderInput, { type: "session.revert" }>,
   ): Promise<void> {
     if (input.scope !== "conversation") {
-      throw new Error(`Cursor provider supports conversation revert only, not "${input.scope}"`);
+      throw new Error(
+        `Cursor provider supports conversation revert only, not "${input.scope}"`,
+      );
     }
     const token = revertTokenOf(input.token);
     if (!token) throw new Error("Cursor revert token is missing or malformed");
     const keep = state.userMessageIds.indexOf(token.messageId);
-    if (keep === -1) throw new Error("Cursor revert target message is not in this session");
+    if (keep === -1)
+      throw new Error("Cursor revert target message is not in this session");
     // Drop the target message and everything after it from the daemon view.
     state.userMessageIds = state.userMessageIds.slice(0, keep);
     // The SDK cannot delete turns; close the live runtime so subsequent
@@ -1872,9 +2243,18 @@ function createConnection(
       ...(apiKey ? { apiKey } : {}),
       model: resolveModelSelection(state),
       ...(tools ? { tools } : {}),
-      ...(usesPaseoDelegation(state.config) ? { disallowedTools: ["task"] } : {}),
-      local: cursorLocalOptions(state.config, store, isAutoReviewMode(state.config.mode)),
-      ...(state.config.systemPrompt ? { systemPrompt: state.config.systemPrompt } : {}),
+      ...(usesPaseoDelegation(state.config)
+        ? { disallowedTools: ["task"] }
+        : {}),
+      local: cursorLocalOptions(
+        state.config,
+        store,
+        isAutoReviewMode(state.config.mode),
+        (change) => acceptConnectionState(state, change),
+      ),
+      ...(state.config.systemPrompt
+        ? { systemPrompt: state.config.systemPrompt }
+        : {}),
       mcpServers: toMcpServers(state.config),
     })) as CursorAgent;
     state.runtimeAutoReview = isAutoReviewMode(state.config.mode);
@@ -1890,7 +2270,8 @@ function createConnection(
   function revertTokenOf(token: unknown): { messageId: string } | null {
     if (token !== null && typeof token === "object" && !Array.isArray(token)) {
       const messageId = Reflect.get(token, "messageId");
-      if (typeof messageId === "string" && messageId.length > 0) return { messageId };
+      if (typeof messageId === "string" && messageId.length > 0)
+        return { messageId };
     }
     return null;
   }
@@ -1900,9 +2281,12 @@ function createConnection(
    * given native agent id and drops provider-owned children. The durable
    * stored record stays resumable via Agent.resume on unarchive/restore.
    */
-  async function archiveSession(persistence: ProviderPersistence): Promise<void> {
+  async function archiveSession(
+    persistence: ProviderPersistence,
+  ): Promise<void> {
     const parsed = persistenceSchema.safeParse(persistence);
-    if (!parsed.success) throw new Error("Cursor archive persistence is malformed");
+    if (!parsed.success)
+      throw new Error("Cursor archive persistence is malformed");
     const agentId = parsed.data.data.agentId;
     for (const [childId, child] of [...children.entries()]) {
       const parent = sessions.get(child.parentSessionId);
@@ -1921,9 +2305,12 @@ function createConnection(
     }
   }
 
-  async function unarchiveSession(persistence: ProviderPersistence): Promise<void> {
+  async function unarchiveSession(
+    persistence: ProviderPersistence,
+  ): Promise<void> {
     const parsed = persistenceSchema.safeParse(persistence);
-    if (!parsed.success) throw new Error("Cursor unarchive persistence is malformed");
+    if (!parsed.success)
+      throw new Error("Cursor unarchive persistence is malformed");
     // No-op by design: local store records are never deleted, so the next
     // session.open with this persistence resumes via Agent.resume.
   }
@@ -1961,7 +2348,9 @@ function createConnection(
       }
       closed = true;
       await Promise.all(
-        [...sessions.values()].map((state) => closeAgent(state).catch(() => undefined)),
+        [...sessions.values()].map((state) =>
+          closeAgent(state).catch(() => undefined),
+        ),
       );
       sessions.clear();
       children.clear();
@@ -1983,17 +2372,20 @@ function cursorLocalOptions(
   config: Pick<ProviderSessionConfig, "cwd">,
   store: CursorLocalAgentStore,
   autoReview: boolean,
+  onConnectionStateChange: (change: CursorConnectionState) => void,
 ): {
   cwd: string;
   store: CursorLocalAgentStore;
   settingSources: Array<(typeof CURSOR_SETTING_SOURCES)[number]>;
   autoReview: boolean;
+  onConnectionStateChange: (change: CursorConnectionState) => void;
 } {
   return {
     cwd: config.cwd,
     store,
     settingSources: [...CURSOR_SETTING_SOURCES],
     autoReview,
+    onConnectionStateChange,
   };
 }
 
@@ -2032,13 +2424,18 @@ function toAgentMode(mode: string | undefined): "agent" | "plan" {
 function toMcpServers(
   config: ProviderSessionConfig,
 ):
-  | Record<string, { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> }>
+  | Record<
+      string,
+      | { command: string; args?: string[]; env?: Record<string, string> }
+      | { url: string; headers?: Record<string, string> }
+    >
   | undefined {
   const entries = Object.entries(config.mcpServers ?? {});
   if (entries.length === 0) return undefined;
   const servers: Record<
     string,
-    { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> }
+    | { command: string; args?: string[]; env?: Record<string, string> }
+    | { url: string; headers?: Record<string, string> }
   > = {};
   for (const [name, server] of entries) {
     if (server.type === "stdio") {
