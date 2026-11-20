@@ -252,6 +252,16 @@ export type CursorInteractionUpdate =
       modelCallId?: string;
       taskUpdate: CursorTaskUpdate;
     }
+  | {
+      type: "model-call-completed";
+      modelCallId: string;
+      usage: {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheWriteTokens: number;
+      };
+    }
   | { type: string };
 
 export interface CursorAgentMessage {

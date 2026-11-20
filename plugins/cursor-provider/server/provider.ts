@@ -167,6 +167,8 @@ interface SessionState {
   autoCompaction: CompactionState | null;
   /** Open "reconnecting" notice for the active turn's transport retry. */
   reconnect: { turnId: string; itemId: string; attempt: number } | null;
+  /** Window size from the last checkpoint read, for mid-turn fill updates. */
+  contextMaxTokens: number | null;
 }
 
 interface CompactionState {
@@ -812,6 +814,7 @@ function createConnection(
           compaction: null,
           autoCompaction: null,
           reconnect: null,
+          contextMaxTokens: null,
         };
         sessions.set(input.sessionId, state);
         try {
@@ -1584,10 +1587,30 @@ function createConnection(
   > {
     const window = await loadContextWindow(state, runId);
     if (!window) return {};
+    state.contextMaxTokens = window.maxTokens;
     return {
       contextWindowMaxTokens: window.maxTokens,
       contextWindowUsedTokens: window.usedTokens,
     };
+  }
+
+  /**
+   * Mid-turn fill from a finished model call: its prompt plus its reply, which
+   * is what the checkpoint's `used_tokens` records (Cursor's `inputTokens`
+   * already includes cache reads and writes). Needs the window size from an
+   * earlier checkpoint read; the turn's end re-reads the checkpoint.
+   */
+  function emitLiveContext(state: SessionState, usedTokens: number): void {
+    const max = state.contextMaxTokens;
+    if (!max || !Number.isFinite(usedTokens) || usedTokens <= 0) return;
+    emit({
+      type: "session.usage",
+      sessionId: state.id,
+      usage: {
+        contextWindowMaxTokens: max,
+        contextWindowUsedTokens: Math.min(usedTokens, max),
+      },
+    });
   }
 
   async function emitContextWindow(state: SessionState): Promise<void> {
@@ -1706,6 +1729,14 @@ function createConnection(
     update: CursorInteractionUpdate,
   ): void {
     if (state.closed || state.activeTurnId !== turnId) return;
+    if (update.type === "model-call-completed") {
+      const { usage } = update as Extract<
+        CursorInteractionUpdate,
+        { type: "model-call-completed" }
+      >;
+      emitLiveContext(state, usage.inputTokens + usage.outputTokens);
+      return;
+    }
     if (update.type !== "tool-call-delta") return;
     const { callId, taskUpdate } = update as Extract<
       CursorInteractionUpdate,

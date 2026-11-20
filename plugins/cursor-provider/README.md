@@ -215,8 +215,12 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   run usage is a billed sum across every model call, so it is wrong after
   compaction. The saved conversation checkpoint carries `used_tokens` and
   `max_tokens` (the IDE ring's numbers, including the post-summary size). The
-  indicator updates when a session opens and when a turn ends. A conversation
-  that never checkpointed has no figure.
+  indicator updates when a session opens and when a turn ends. Between those,
+  each `model-call-completed` delta (SDK ≥ 1.4) moves it to that call's
+  `inputTokens + outputTokens`, which equals the next checkpoint's
+  `used_tokens` (`inputTokens` already includes cache reads and writes), so a
+  long turn and an in-turn summary show live. A conversation that never
+  checkpointed has no figure.
 - History replay on resume is best-effort (last ~20 messages) and never blocks
   session open.
 - **Cursor `task` subagents (fallback only) block their parent and can't be
