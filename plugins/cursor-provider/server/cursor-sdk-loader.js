@@ -205,4 +205,8 @@ function loadCursorSdkSqlite() {
   return cachedSqlite;
 }
 
-module.exports = { loadCursorSdk, loadCursorSdkSqlite };
+function cursorPluginDirectory() {
+  return path.dirname(findAnchor());
+}
+
+module.exports = { cursorPluginDirectory, loadCursorSdk, loadCursorSdkSqlite };

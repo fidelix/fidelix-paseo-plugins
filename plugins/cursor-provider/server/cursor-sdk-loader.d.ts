@@ -85,4 +85,6 @@ export interface CursorLocalAgentRunDocument {
 declare const loadCursorSdk: () => CursorSdkModule;
 declare const loadCursorSdkSqlite: () => CursorSdkSqliteModule;
 
-export { loadCursorSdk, loadCursorSdkSqlite };
+declare const cursorPluginDirectory: () => string;
+
+export { cursorPluginDirectory, loadCursorSdk, loadCursorSdkSqlite };

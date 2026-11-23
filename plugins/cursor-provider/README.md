@@ -8,10 +8,12 @@ It registers provider id `cursor-sdk` ("Cursor SDK", `server/provider.ts:203`).
 
 - Paseo `>=0.10.3` (see `requirements` in `paseo-plugin.json`; matches the installed
   `@getpaseo/plugin` / `@getpaseo/protocol` 0.10.3 SDK).
-- Node `>=22.13` on the daemon host (the `@cursor/sdk@1.4.2` `engines` floor).
-- No build step: Paseo compiles the TypeScript entries on load, and Git installs run
-  no package manager or install scripts, so no `prepare`/`prepack` entry is needed
-  (see "Ship notes" below).
+- Node `>=22.13` on the daemon host. On macOS, Paseo Desktop uses a standalone
+  Node executable for Cursor sessions so Cursor's native parser can load.
+  The worker uses `node` on the daemon's PATH or the executable specified by
+  `CURSOR_PROVIDER_NODE` in the daemon environment.
+- Git installs run `npm ci --omit=dev` and build the worker through the plugin
+  manifest. Paseo compiles the client and server entries on load.
 
 ## Setup
 
@@ -23,8 +25,8 @@ paseo plugin install /absolute/path/to/cursor-provider-plugin
 paseo plugin ls   # expect `running`
 ```
 
-Directory installs need `npm install` run manually so `node_modules/@cursor/sdk`
-exists for the runtime loader (`server/cursor-sdk-loader.js`).
+For directory installs, run `npm install` and `npm run build:worker` in the
+plugin directory first.
 
 ### 2. API key
 
@@ -259,8 +261,5 @@ The built-in provider shells out to `cursor-agent acp`
 - `paseo-plugin.json` `requirements.paseo: ">=0.10.3"` is a valid semver range and
   matches the SDK the plugin typechecks against.
 - `package-lock.json` is committed.
-- No `prepare`/`prepack`/build script: Paseo compiles both bundles from source at
-  load time, and Git installs never run a package manager, so a build-prep entry
-  would never execute. Keep publishing from source.
 - `private: true` blocks `npm publish`; remove it only if an npm distribution is
   wanted in addition to Git / directory installs.
