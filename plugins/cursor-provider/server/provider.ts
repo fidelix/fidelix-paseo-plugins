@@ -165,8 +165,8 @@ interface SessionState {
   compaction: CompactionState | null;
   /** Summarization Cursor started on its own inside a regular turn. */
   autoCompaction: CompactionState | null;
-  /** Open "reconnecting" notice for the active turn's transport retry. */
-  reconnect: { turnId: string; itemId: string; attempt: number } | null;
+  /** Transport outage in progress, with its delayed "still reconnecting" notice. */
+  reconnect: { turnId: string; timer: ReturnType<typeof setTimeout> } | null;
   /** Window size from the last checkpoint read, for mid-turn fill updates. */
   contextMaxTokens: number | null;
 }
@@ -195,6 +195,7 @@ interface ChildState {
 /** Bounds on subagent updates buffered before the child session exists. */
 const MAX_PENDING_TASK_CALLS = 16;
 const MAX_PENDING_TASK_UPDATES = 256;
+const RECONNECT_NOTICE_DELAY_MS = 20_000;
 
 interface ProviderOptions {
   retry?: Partial<RetryPolicy>;
@@ -1247,7 +1248,7 @@ function createConnection(
       ? { turnId, itemId: null, completed: false }
       : null;
     state.autoCompaction = null;
-    state.reconnect = null;
+    clearReconnect(state);
     state.turnSeq += 1;
     const messageId = `user:${state.turnSeq}`;
     emit({
@@ -1757,9 +1758,10 @@ function createConnection(
   }
 
   /**
-   * The SDK's transport retry is silent on the message stream. Surface it as
-   * one notice per outage, rewritten in place from "reconnecting" to
-   * "reconnected", so a stalled turn reads as a dropped connection.
+   * The SDK's transport retry is silent on the message stream. Paseo appends
+   * every notification and cannot remove one, so a reconnect that succeeds
+   * within RECONNECT_NOTICE_DELAY_MS posts nothing; only a stall that outlasts
+   * it gets one warning. Every state still lands in the turn diagnostics.
    */
   function acceptConnectionState(
     state: SessionState,
@@ -1778,34 +1780,35 @@ function createConnection(
           }
         : {}),
     });
-    if (state.closed || !turnId) return;
-    if (change.state === "reconnecting") {
-      if (state.reconnect?.turnId !== turnId)
-        state.reconnect = { turnId, itemId: newId("reconnect"), attempt: 0 };
-      state.reconnect.attempt = change.attempt;
-      emit({
-        type: "timeline.item",
-        sessionId: state.id,
-        item: {
-          type: "notification",
-          id: state.reconnect.itemId,
-          level: "warning",
-          message: `Cursor connection dropped; reconnecting (attempt ${change.attempt})…`,
-        },
-      });
+    if (change.state === "connected" || state.closed || !turnId) {
+      clearReconnect(state);
       return;
     }
-    if (state.reconnect?.turnId !== turnId) return;
-    emit({
-      type: "timeline.item",
-      sessionId: state.id,
-      item: {
-        type: "notification",
-        id: state.reconnect.itemId,
-        level: "info",
-        message: `Reconnected to Cursor (attempt ${state.reconnect.attempt}).`,
-      },
-    });
+    if (state.reconnect?.turnId === turnId) return;
+    clearReconnect(state);
+    const outage = {
+      turnId,
+      timer: setTimeout(() => {
+        if (state.reconnect !== outage || state.closed) return;
+        if (state.activeTurnId !== turnId) return;
+        emit({
+          type: "timeline.item",
+          sessionId: state.id,
+          item: {
+            type: "notification",
+            id: newId("reconnect"),
+            level: "warning",
+            message: "Cursor connection dropped; still reconnecting…",
+          },
+        });
+      }, RECONNECT_NOTICE_DELAY_MS),
+    };
+    outage.timer.unref?.();
+    state.reconnect = outage;
+  }
+
+  function clearReconnect(state: SessionState): void {
+    if (state.reconnect) clearTimeout(state.reconnect.timer);
     state.reconnect = null;
   }
 

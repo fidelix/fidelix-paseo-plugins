@@ -185,11 +185,12 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   shows "the conversation is unchanged", and `fallback: true` warns that a
   trimmed transcript was saved instead. The SDK refuses (`ConfigurationError`,
   not retried) on an agent with no saved conversation yet.
-- **Transport retries are visible.** The SDK's `onConnectionStateChange`
-  (SDK ≥ 1.4, passed on create and resume) drives one notice per outage:
-  "reconnecting (attempt N)" while it retries, rewritten to "Reconnected"
-  when the stream is back. Each state also lands in the turn diagnostics as
-  a `connection` note with `errorClass` and `stallAborted`.
+- **Only long reconnects are visible.** The SDK's `onConnectionStateChange`
+  (SDK ≥ 1.4, passed on create and resume) reports transport retries. Paseo
+  appends every notification and can't remove one, so a reconnect that
+  succeeds within 20s posts nothing; a longer stall posts one "still
+  reconnecting" warning. Each state lands in the turn diagnostics as a
+  `connection` note with `attempt`, `errorClass` and `stallAborted`.
 - **Permission level is the mode, like Claude and Codex.** Local SDK runs have
   no approval channel, so the provider never raises a permission. The stream's
   `request` event only announces the run's request id and is not shown.
