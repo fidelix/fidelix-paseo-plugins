@@ -28,6 +28,7 @@ import {
   settleOrphanedRun,
   sqliteStateRoot,
 } from "./local-store.js";
+import { renderAttachmentAsText } from "./prompt-attachments.js";
 import {
   beginTurnDiagnostics,
   describeError,
@@ -277,8 +278,7 @@ function promptText(
     if (part.type === "text") text.push(part.text);
     else if (part.type === "image")
       images.push({ data: part.data, mimeType: part.mimeType });
-    else
-      throw new Error("Cursor provider supports text and image content only");
+    else text.push(renderAttachmentAsText(part));
   }
   return { text: text.join("\n"), images };
 }
