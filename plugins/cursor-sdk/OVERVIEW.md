@@ -1,6 +1,18 @@
 Cursor SDK adds Cursor's coding agent to Paseo as the **Cursor SDK** provider. It runs the agent through Cursor's official TypeScript SDK (`@cursor/sdk`) in its local runtime, so the agent works on the files of your Paseo workspace and uses the models available to your Cursor account.
 
-Paseo's built-in Cursor provider drives the `cursor-agent` CLI over ACP. This plugin talks to the SDK directly instead. You don't need the CLI, and the composer gets Cursor's live model list with each model's reasoning effort and Fast options.
+## Compared with the built-in Cursor provider
+
+Paseo's built-in Cursor provider starts a `cursor-agent` CLI process for each agent and talks to it over ACP. This plugin talks to Cursor's SDK directly, from one worker process shared by all Cursor agents. What that changes:
+
+- **Failed turns are retried.** When Cursor answers with a rate limit, a model capacity error, or a network error, the plugin retries the turn up to 3 times with backoff and shows a notice for each retry. Authentication and configuration errors are not retried. The built-in provider does not retry a failed turn.
+- **Stalled connections are visible.** When the connection to Cursor drops and takes more than 20 seconds to come back, the timeline says so, so a stuck turn isn't silent.
+- **You can steer a running turn.** A message sent during a turn goes into that turn. The built-in provider does not support steering.
+- **You can rewind the conversation.** The built-in provider has no revert.
+- **Subagents are Paseo agents.** They run in parallel, show up in Paseo, and take follow-up messages, instead of blocking the parent agent.
+- **Your Cursor CLI stays untouched.** There is no CLI to install or keep updated, and changing the model in Paseo doesn't change the CLI's default model, as it does with the built-in provider.
+- **Fewer processes.** One worker serves every Cursor agent, instead of one CLI process per agent.
+
+The built-in provider is still the better fit if you want to approve each tool call, since this plugin cannot ask for permission, or if you need Cursor team commands.
 
 ## Setup
 
@@ -8,7 +20,7 @@ Paseo's built-in Cursor provider drives the `cursor-agent` CLI over ACP. This pl
 - The daemon host needs Node.js 22.13 or later, and npm on the daemon's `PATH` to prepare the plugin. Preparation installs the locked dependencies and bundles the SDK worker. On macOS, Paseo Desktop runs the worker with a standalone Node executable. Set `CURSOR_PROVIDER_NODE` in the daemon environment to choose a different one.
 - Open **Settings > Plugins > Cursor SDK** and choose one way to authenticate:
   - **Sign in with Cursor**: opens a sign-in link, so you don't paste anything.
-  - **API key**: paste a user or service-account key from [cursor.com/dashboard/api](https://cursor.com/dashboard/api). **Check and save key** checks the key against the model catalog before saving it, which does not spend usage.
+  - **API key**: paste a user or service-account key from [cursor.com/dashboard/api](https://cursor.com/dashboard/api). **Check and save** checks the key with Cursor before saving it, which uses no credits.
   - **Environment**: set `CURSOR_API_KEY` on the daemon, or on a single agent to override the other sources for that agent.
 - Signing in to the Cursor CLI does not carry over. Usage bills to your Cursor plan, as it does in the Cursor editor.
 
@@ -18,15 +30,13 @@ Paseo's built-in Cursor provider drives the `cursor-agent` CLI over ACP. This pl
 - **Reasoning effort**: each model's own levels, such as Low through Max, or On and Off for older thinking models. Switching models selects the new model's default level.
 - **Fast**: an Off and Fast switch, shown only on models that offer it.
 - **Modes**: **Bypass** runs every tool call. **Auto-review** has Cursor's auto-review classifier check each call, and denies any call it would ask you about. **Plan** is read-only.
-- **Steering**: a message sent during a turn steers the running turn.
 - **Slash commands**: Cursor skills and command files from the workspace and your home folder (`.cursor`, `.claude`, `.codex`, `.grok`, `.agents`, and installed Cursor plugins). `/plan`, `/compact`, `/review`, and `/commit` are included when no skill uses those names. `/compact` summarizes the conversation.
 
 ## Sessions
 
 - Text and image prompts, MCP servers (stdio, HTTP, and SSE), token usage, and the context window indicator.
 - Sessions are saved on the daemon host and survive daemon restarts. A session that reopens replays its last 20 or so messages.
-- Subagents: when the agent has Paseo's tools, it delegates through Paseo, so each subagent is a normal Paseo agent that you can watch and message. Without Paseo's tools, Cursor's own subagents appear as read-only child sessions.
-- Rate limits, model capacity errors, and network failures are retried up to 3 times with backoff, and the timeline shows a notice for each retry. Authentication and configuration errors are not retried. A reconnect that lasts more than 20 seconds also shows a notice.
+- Subagents: when the agent has Paseo's tools, it delegates through Paseo. Without them, Cursor's own subagents appear as read-only child sessions.
 
 ## Data access
 

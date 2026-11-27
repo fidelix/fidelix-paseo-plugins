@@ -7,6 +7,35 @@ Community Paseo provider that runs the Cursor coding agent through the official
 It registers provider id `cursor-sdk` ("Cursor SDK", `server/provider.ts:203`).
 The registry listing page is [`OVERVIEW.md`](OVERVIEW.md).
 
+## Why not the built-in Cursor provider?
+
+Paseo already ships a Cursor provider. It starts the `cursor-agent` CLI for every
+agent and talks to it over ACP, and for long-running work that falls short:
+
+- **A hiccup kills the turn.** A rate limit, a busy model, or a dropped connection
+  ends the turn with an error, and you resend by hand. This plugin retries those
+  failures up to 3 times with backoff and tells you in the timeline each time.
+- **Stalls are silent.** When the connection to Cursor hangs, nothing says so. Here a
+  reconnect that takes more than 20 seconds shows up as a notice, so you know the
+  agent is waiting on Cursor and not on you.
+- **You can't steer or rewind.** With this plugin, a message sent mid-turn goes into
+  the running turn, and you can revert the conversation.
+- **Subagents block.** Cursor's own `task` subagents stop the parent until they finish
+  and can't be messaged. Here the agent delegates through Paseo, so subagents run in
+  parallel and show up as normal Paseo agents.
+- **It touches your CLI.** You need `cursor-agent` installed and recent, and picking
+  a model in Paseo changes the CLI's default model. This plugin needs no CLI at all.
+- **One process per agent.** Ten Cursor agents means ten CLI processes. Here one
+  worker serves every Cursor agent.
+
+It is also built to survive a busy daemon: sessions live in SQLite, a run left behind
+by a crash or reload is cancelled on the next resume instead of wedging the agent
+with `already has active run`, and every turn writes local diagnostics (see
+[Diagnostics](#4-diagnostics)) so failures can be explained after the fact.
+
+Keep the built-in provider if you want to approve each tool call (local SDK runs
+have no approval channel) or need Cursor team commands.
+
 ## Requirements
 
 - Paseo `>=0.11.0` (see `requirements` in `paseo-plugin.json`). 0.11.0 is the first
@@ -47,8 +76,10 @@ Key sources, in precedence order (`server/provider.ts:276`):
 | 3 | Daemon env | `CURSOR_API_KEY` exported on the daemon process |
 | 4 | Sign in | **Sign in with Cursor** in the settings screen; the SDK stores the key in `~/.cursor/sdk/auth.json` and falls back to it |
 
-The settings screen has a **Check key** action that calls the `cursor.validate-key`
-RPC: a key-only `Cursor.models.list` catalog check that spends nothing. Otherwise the
+The settings screen (Settings > Plugins > Cursor SDK) shows under **Connection**
+whether a saved key or a sign-in is set up. **Check and save** under **API key** calls the
+`cursor.validate-key` RPC first: a key-only `Cursor.models.list` catalog check that
+spends nothing, so a key that fails is never stored. Otherwise the
 key is validated on next session open. Without any key, sessions fail with
 `Set CURSOR_API_KEY to use the Cursor provider` and the model catalog falls back to
 a single `composer-2.5` entry.
