@@ -1,4 +1,4 @@
-# fidelix-paseo-plugins
+# paseo-plugins
 
 Personal Paseo plugin monorepo. Each directory under `plugins/` is an
 independent plugin with its own `paseo-plugin.json` manifest, `package.json`,
@@ -7,7 +7,7 @@ and git history (imported with history preserved).
 Install one plugin from this repo with a `git:` source and its folder:
 
 ```bash
-paseo plugin add git:fidelix/fidelix-paseo-plugins:plugins/cursor-sdk
+paseo plugin add git:fidelix/paseo-plugins:plugins/cursor-sdk
 ```
 
 ## Plugins

@@ -57,4 +57,4 @@ The built-in provider is still the better fit if you want to approve each tool c
 - Team and Cursor commands come from an endpoint Cursor does not document. If it changes or fails, the menu shows only local skills and commands. `/multi-model-review`, `/simplify`, and `/best-of-n` are written for Cursor's own subagent tool, which this plugin replaces with Paseo agents when Paseo's tools are on.
 - An agent system prompt set in Paseo replaces Cursor's own system prompt.
 
-The [README](https://github.com/fidelix/fidelix-paseo-plugins/tree/main/plugins/cursor-sdk#readme) covers installation from source, the diagnostics format, and a comparison with the built-in Cursor provider.
+The [README](https://github.com/fidelix/paseo-plugins/tree/main/plugins/cursor-sdk#readme) covers installation from source, the diagnostics format, and a comparison with the built-in Cursor provider.

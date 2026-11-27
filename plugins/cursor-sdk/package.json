@@ -13,11 +13,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fidelix/fidelix-paseo-plugins.git",
+    "url": "git+https://github.com/fidelix/paseo-plugins.git",
     "directory": "plugins/cursor-sdk"
   },
-  "homepage": "https://github.com/fidelix/fidelix-paseo-plugins/tree/main/plugins/cursor-sdk#readme",
-  "bugs": "https://github.com/fidelix/fidelix-paseo-plugins/issues",
+  "homepage": "https://github.com/fidelix/paseo-plugins/tree/main/plugins/cursor-sdk#readme",
+  "bugs": "https://github.com/fidelix/paseo-plugins/issues",
   "files": [
     "paseo-plugin.json",
     "OVERVIEW.md",
