@@ -14,6 +14,6 @@ paseo plugin add fidelix/fidelix-paseo-plugins --path plugins/cursor-provider
 
 | Directory | Plugin ID | Description |
 | --- | --- | --- |
-| `plugins/cursor-provider` | `cursor-provider` | Cursor coding agent via the official Cursor SDK (local runtime), with retriable-failure detection and retry |
+| `plugins/cursor-provider` | `cursor-provider` | Cursor SDK: Cursor's coding agent through the official Cursor SDK, with the live model catalog, per-model reasoning effort, Fast mode, and automatic retry on rate limits |
 
 See each plugin's own README for setup, limitations, and parity notes.

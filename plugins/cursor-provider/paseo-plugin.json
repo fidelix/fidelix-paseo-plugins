@@ -1,14 +1,31 @@
 {
   "id": "cursor-provider",
-  "description": "Cursor coding agent via the official Cursor SDK (local runtime), with retriable-failure detection and retry",
+  "name": "Cursor SDK",
+  "description": "Cursor's coding agent through the official Cursor SDK, with the live model catalog, per-model reasoning effort, Fast mode, and automatic retry on rate limits.",
+  "icon": "assets/icon.png",
+  "media": [
+    "assets/00-thumbnail.png",
+    "assets/01-conversation.png",
+    "assets/02-model-picker.png",
+    "assets/03-reasoning-effort.png",
+    "assets/04-permission-modes.png",
+    "assets/05-settings.png"
+  ],
+  "translations": {
+    "zh-CN": {
+      "name": "Cursor SDK",
+      "description": "通过官方 Cursor SDK 运行 Cursor 编程智能体，支持实时模型列表、按模型设置推理强度、Fast 模式，并在遇到速率限制时自动重试。"
+    }
+  },
   "requirements": {
-    "paseo": ">=0.10.3"
+    "paseo": ">=0.11.0"
   },
   "build": [
     [
       "npm",
       "ci",
-      "--omit=dev"
+      "--omit=dev",
+      "--ignore-scripts"
     ],
     [
       "npm",

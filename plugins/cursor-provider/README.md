@@ -1,19 +1,23 @@
-# Cursor provider plugin
+# Cursor SDK
+
+![Cursor SDK](assets/00-thumbnail.png)
 
 Community Paseo provider that runs the Cursor coding agent through the official
 `@cursor/sdk` (local runtime, SQLite store) instead of the `cursor-agent` ACP binary.
 It registers provider id `cursor-sdk` ("Cursor SDK", `server/provider.ts:203`).
+The registry listing page is [`OVERVIEW.md`](OVERVIEW.md).
 
 ## Requirements
 
-- Paseo `>=0.10.3` (see `requirements` in `paseo-plugin.json`; matches the installed
-  `@getpaseo/plugin` / `@getpaseo/protocol` 0.10.3 SDK).
+- Paseo `>=0.11.0` (see `requirements` in `paseo-plugin.json`). 0.11.0 is the first
+  release that reads the listing metadata (`name`, `icon`, `media`); the plugin
+  typechecks against the `@getpaseo/plugin` 0.10.3 SDK.
 - Node `>=22.13` on the daemon host. On macOS, Paseo Desktop uses a standalone
   Node executable for Cursor sessions so Cursor's native parser can load.
   The worker uses `node` on the daemon's PATH or the executable specified by
   `CURSOR_PROVIDER_NODE` in the daemon environment.
-- Git installs run `npm ci --omit=dev` and build the worker through the plugin
-  manifest. Paseo compiles the client and server entries on load.
+- Git installs run `npm ci --omit=dev --ignore-scripts` and build the worker
+  through the plugin manifest. Paseo compiles the client and server entries on load.
 
 ## Setup
 
@@ -41,6 +45,7 @@ Key sources, in precedence order (`server/provider.ts:276`):
 | 1 | Per-agent env | `CURSOR_API_KEY` in the agent's env (e.g. `--env`) — wins for that session |
 | 2 | Settings UI | Cursor settings screen (host-scoped plugin settings) |
 | 3 | Daemon env | `CURSOR_API_KEY` exported on the daemon process |
+| 4 | Sign in | **Sign in with Cursor** in the settings screen; the SDK stores the key in `~/.cursor/sdk/auth.json` and falls back to it |
 
 The settings screen has a **Check key** action that calls the `cursor.validate-key`
 RPC: a key-only `Cursor.models.list` catalog check that spends nothing. Otherwise the
@@ -255,12 +260,15 @@ The built-in provider shells out to `cursor-agent acp`
 
 ## Ship notes
 
-- `package.json` `files` covers `paseo-plugin.json`, both entries
-  (`index.client.tsx`, `index.server.ts`), `client/`, `server/`, `shared/`, and
-  `icon.svg` — all present. (`README.md`, like `package.json`, ships under npm
+- `package.json` `files` covers `paseo-plugin.json`, `OVERVIEW.md`, `assets/`, both
+  entries (`index.client.tsx`, `index.server.ts`), `client/`, `server/`, `shared/`,
+  and `icon.svg` — all present. (`README.md`, like `package.json`, ships under npm
   defaults even though it is not listed in `files`.)
-- `paseo-plugin.json` `requirements.paseo: ">=0.10.3"` is a valid semver range and
-  matches the SDK the plugin typechecks against.
+- Listing: `name`, `description`, `icon` (`assets/icon.png`), and `media` in
+  `paseo-plugin.json`, plus a `zh-CN` name and description. `assets/00-thumbnail.png`
+  is the registry card. Screenshots come from a throwaway daemon with a sample
+  `storefront-web` repository; retake them when the composer or settings change.
+- `paseo-plugin.json` `requirements.paseo: ">=0.11.0"` is a valid semver range.
 - `package-lock.json` is committed.
 - `private: true` blocks `npm publish`; remove it only if an npm distribution is
   wanted in addition to Git / directory installs.
