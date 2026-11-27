@@ -25,7 +25,7 @@ The registry listing page is [`OVERVIEW.md`](OVERVIEW.md).
 
 ```bash
 npm run typecheck
-paseo plugin install /absolute/path/to/cursor-provider-plugin
+paseo plugin install /absolute/path/to/cursor-sdk
 paseo plugin ls   # expect `running`
 ```
 

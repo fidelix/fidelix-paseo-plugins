@@ -134,7 +134,7 @@ function rankInstall(dir) {
   let canonical = false;
   try {
     const manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
-    canonical = Boolean(manifest && manifest.name === "cursor-provider-plugin");
+    canonical = Boolean(manifest && manifest.name === "paseo-cursor-sdk");
   } catch {
     // ignore
   }

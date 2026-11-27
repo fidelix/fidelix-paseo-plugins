@@ -1,5 +1,5 @@
 {
-  "id": "cursor-provider",
+  "id": "cursor-sdk",
   "name": "Cursor SDK",
   "description": "Cursor's coding agent through the official Cursor SDK, with the live model catalog, per-model reasoning effort, Fast mode, and automatic retry on rate limits.",
   "icon": "assets/icon.png",

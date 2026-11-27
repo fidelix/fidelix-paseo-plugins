@@ -1,5 +1,5 @@
 {
-  "name": "cursor-provider-plugin",
+  "name": "paseo-cursor-sdk",
   "private": true,
   "version": "0.0.0",
   "description": "Cursor's coding agent through the official Cursor SDK, with the live model catalog, per-model reasoning effort, Fast mode, and automatic retry on rate limits.",
@@ -10,12 +10,13 @@
     "provider"
   ],
   "author": "fidelix",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fidelix/fidelix-paseo-plugins.git",
-    "directory": "plugins/cursor-provider"
+    "directory": "plugins/cursor-sdk"
   },
-  "homepage": "https://github.com/fidelix/fidelix-paseo-plugins/tree/main/plugins/cursor-provider#readme",
+  "homepage": "https://github.com/fidelix/fidelix-paseo-plugins/tree/main/plugins/cursor-sdk#readme",
   "bugs": "https://github.com/fidelix/fidelix-paseo-plugins/issues",
   "files": [
     "paseo-plugin.json",

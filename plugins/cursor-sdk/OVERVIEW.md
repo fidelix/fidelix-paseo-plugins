@@ -42,4 +42,4 @@ Paseo's built-in Cursor provider drives the `cursor-agent` CLI over ACP. This pl
 - Team commands from Cursor are not available as slash commands.
 - An agent system prompt set in Paseo replaces Cursor's own system prompt.
 
-The [README](https://github.com/fidelix/fidelix-paseo-plugins/tree/main/plugins/cursor-provider#readme) covers installation from source, the diagnostics format, and a comparison with the built-in Cursor provider.
+The [README](https://github.com/fidelix/fidelix-paseo-plugins/tree/main/plugins/cursor-sdk#readme) covers installation from source, the diagnostics format, and a comparison with the built-in Cursor provider.
