@@ -52,10 +52,18 @@ import type {
 import {
   discoverCursorSlashCatalog,
   fallbackSlashCatalog,
+  mergeRemoteSlashEntries,
   renderSlashPrompt,
   toProviderCommands,
   type CursorSlashEntry,
 } from "./cursor-commands.js";
+import {
+  createRemoteCommandSource,
+  insideGitRepo,
+  resolveRemoteCredentials,
+  toRemoteSlashEntries,
+  type RemoteCommandCredentials,
+} from "./cursor-remote-commands.js";
 import {
   applySettings,
   CURSOR_MODES,
@@ -426,6 +434,9 @@ function createConnection(
   >();
   /** When the last catalog fetch failed; fetches pause for CATALOG_RETRY_MS after. */
   let catalogFailedAt = 0;
+  const remoteCommands = createRemoteCommandSource();
+  /** Last team/Cursor command failure logged, same dedup as lastCatalogError. */
+  let lastRemoteCommandError: string | null = null;
 
   function emit(event: ProviderEvent): void {
     if (closed) return;
@@ -1064,19 +1075,69 @@ function createConnection(
       );
       slashEntries = fallbackSlashCatalog();
     }
-    state.slashCatalog = new Map(
-      slashEntries.map((entry) => [entry.name, entry]),
+    // The SDK itself falls back to the daemon's CURSOR_API_KEY, then the
+    // stored login; the dashboard calls use the same key it runs with.
+    const remoteCredentials = await resolveRemoteCredentials(
+      apiKey ?? readProcessApiKey(),
     );
-    emit({
-      type: "session.commands",
-      sessionId: state.id,
-      commands: toProviderCommands(slashEntries),
-    });
+    const gitRepo = remoteCredentials ? await insideGitRepo(config.cwd) : false;
+    const cachedRemote = remoteCredentials
+      ? remoteCommands.peek(remoteCredentials)
+      : null;
+    publishSlashCatalog(
+      state,
+      cachedRemote
+        ? mergeRemoteSlashEntries(
+            slashEntries,
+            toRemoteSlashEntries(cachedRemote, { insideGitRepo: gitRepo }),
+          )
+        : slashEntries,
+    );
+    if (remoteCredentials && !cachedRemote) {
+      void addRemoteCommands(state, slashEntries, remoteCredentials, gitRepo);
+    }
     if (persistence && persistedAgentId) {
       await replayHistory(state, agent, config);
     }
     await emitContextWindow(state);
     emit({ type: "session.ready", requestId, sessionId: state.id });
+  }
+
+  function publishSlashCatalog(
+    state: SessionState,
+    entries: CursorSlashEntry[],
+  ): void {
+    state.slashCatalog = new Map(entries.map((entry) => [entry.name, entry]));
+    emit({
+      type: "session.commands",
+      sessionId: state.id,
+      commands: toProviderCommands(entries),
+    });
+  }
+
+  /** Republishes the menu once team/Cursor commands arrive; never fails the session. */
+  async function addRemoteCommands(
+    state: SessionState,
+    local: CursorSlashEntry[],
+    credentials: RemoteCommandCredentials,
+    gitRepo: boolean,
+  ): Promise<void> {
+    try {
+      const remote = toRemoteSlashEntries(
+        await remoteCommands.get(credentials),
+        { insideGitRepo: gitRepo },
+      );
+      lastRemoteCommandError = null;
+      if (state.closed || remote.length === 0) return;
+      publishSlashCatalog(state, mergeRemoteSlashEntries(local, remote));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === lastRemoteCommandError) return;
+      lastRemoteCommandError = message;
+      console.error(
+        `cursor-sdk provider: team and Cursor commands unavailable (${message}); the slash menu shows local skills and commands only.`,
+      );
+    }
   }
 
   /**

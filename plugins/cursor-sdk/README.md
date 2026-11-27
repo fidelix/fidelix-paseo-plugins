@@ -33,8 +33,13 @@ by a crash or reload is cancelled on the next resume instead of wedging the agen
 with `already has active run`, and every turn writes local diagnostics (see
 [Diagnostics](#4-diagnostics)) so failures can be explained after the fact.
 
+The slash menu also carries more of Cursor than the CLI does: your team's
+dashboard commands plus the commands Cursor gives local agents in the editor
+(`/code-review`, `/explain`, `/read-branch`, ...), where `cursor-agent` only
+asks for the CLI's shorter list.
+
 Keep the built-in provider if you want to approve each tool call (local SDK runs
-have no approval channel) or need Cursor team commands.
+have no approval channel).
 
 ## Requirements
 
@@ -157,8 +162,9 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
 - Mid-turn steering (`prompt.steer`, via `run.steer`).
 - Slash commands (`prompt.command`): Cursor skills and command files from the
   session cwd and the home directory (`.cursor`, `.claude`, `.codex`, `.grok`,
-  `.agents`, plus installed `~/.cursor/plugins`), with `/plan`, `/compact`,
-  `/review`, and `/commit` filling any names that are not already taken.
+  `.agents`, plus installed `~/.cursor/plugins`), team commands, and Cursor's
+  global commands, with `/plan`, `/compact`, `/review`, and `/commit` filling
+  any names that are not already taken.
 - `agent` / `plan` modes, switchable mid-session; model switch applies on next prompt.
 - Live model catalog via `Cursor.models.list` (single `composer-2.5` fallback when
   keyless or the list call fails).
@@ -205,10 +211,24 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   unused** — nothing is ever deleted server-side by this provider.
 - **Node `>=22.13`** is required by `@cursor/sdk`, even though the daemon compiles
   the server bundle for an older Node target.
-- **Slash menu is the on-disk catalog, not Cursor's cloud commands.** The SDK
+- **Slash menu: disk catalog first, Cursor's commands a moment later.** The SDK
   exposes no command listing. The provider scans the same local skill and
   command files cursor-agent does (`server/cursor-commands.ts`) and publishes
-  them on `session.commands`. Team/dashboard commands are not included. Paseo
+  them on `session.commands` before `session.ready`. Then
+  `server/cursor-remote-commands.ts` does what cursor-agent's loader does
+  itself: exchange the session's key (explicit key, daemon `CURSOR_API_KEY`,
+  or the stored login) at `/auth/exchange_user_api_key`, and call
+  `aiserver.v1.DashboardService/GetTeamCommands` (`activeOnly`) and
+  `GetGlobalCommands`. It asks for the editor's `CLASSIC` surface rather than
+  `CLI`, which unlocks `/code-review`, `/explain`, `/read-branch` and
+  `/use-browser`; `CLOUD_ONLY` commands (`/debug`, `/repro`, `/no-test`) are
+  dropped, and git-only ones need a `.git` at or above the cwd. Team names win
+  over global ones, local files win over both, and remote entries replace only
+  the fallback helpers. The merged list is republished on `session.commands`.
+  Results are cached 10 minutes per key and in-flight requests are shared;
+  a failure is logged once, cools down for a minute, and leaves the local
+  list. The endpoint is undocumented. Remote commands render like command
+  files (`$ARGUMENTS`/`$1`, else the arguments are appended). Paseo
   shows that list when `/` is the first character of the composer. A `/` typed
   later in the draft only lists entries the daemon tagged `kind: "skill"`, and
   the plugin bridge currently tags every plugin command as `kind: "command"`,
@@ -282,7 +302,7 @@ The built-in provider shells out to `cursor-agent acp`
 | Session persistence / listing | Yes | Yes (local SQLite store) | Works |
 | Model catalog | Live, per-model `thought_level` thinking options | Live list, per-model effort-value thinking dropdown | Works |
 | Fast mode toggle | Yes (`fast` feature) | Yes (`Off`/`Fast` select, only on models with a `fast` param) | Works |
-| Slash commands | Dynamic via `available_commands_update` | Local skills + command files, plus helper names that are free | Works, no team commands |
+| Slash commands | Dynamic via `available_commands_update` | Local skills + command files, team commands, Cursor's editor-surface global commands, plus helper names that are free | Works |
 | Tool approval | ACP permission-request flow | Auto-executed; deny cancels run; input questions surfaced | Degraded |
 | Revert | None (`supportsRewind*` all false) | Conversation-only (close + fresh agent; `files`/`both` throw) | Works, limited |
 | Archive / unarchive | Daemon/ACP session lifecycle | Local close + resume; unarchive no-op; cloud statics unused | Degraded |

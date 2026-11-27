@@ -11,8 +11,9 @@ Paseo's built-in Cursor provider starts a `cursor-agent` CLI process for each ag
 - **Subagents are Paseo agents.** They run in parallel, show up in Paseo, and take follow-up messages, instead of blocking the parent agent.
 - **Your Cursor CLI stays untouched.** There is no CLI to install or keep updated, and changing the model in Paseo doesn't change the CLI's default model, as it does with the built-in provider.
 - **Fewer processes.** One worker serves every Cursor agent, instead of one CLI process per agent.
+- **More of Cursor's commands.** The slash menu has the commands Cursor offers local agents in the editor, such as `/code-review`, `/explain`, and `/read-branch`, along with your team's commands. The CLI behind the built-in provider gets a shorter list.
 
-The built-in provider is still the better fit if you want to approve each tool call, since this plugin cannot ask for permission, or if you need Cursor team commands.
+The built-in provider is still the better fit if you want to approve each tool call, since this plugin cannot ask for permission.
 
 ## Setup
 
@@ -30,7 +31,10 @@ The built-in provider is still the better fit if you want to approve each tool c
 - **Reasoning effort**: each model's own levels, such as Low through Max, or On and Off for older thinking models. Switching models selects the new model's default level.
 - **Fast**: an Off and Fast switch, shown only on models that offer it.
 - **Modes**: **Bypass** runs every tool call. **Auto-review** has Cursor's auto-review classifier check each call, and denies any call it would ask you about. **Plan** is read-only.
-- **Slash commands**: Cursor skills and command files from the workspace and your home folder (`.cursor`, `.claude`, `.codex`, `.grok`, `.agents`, and installed Cursor plugins). `/plan`, `/compact`, `/review`, and `/commit` are included when no skill uses those names. `/compact` summarizes the conversation.
+- **Slash commands**:
+  - Cursor skills and command files from the workspace and your home folder (`.cursor`, `.claude`, `.codex`, `.grok`, `.agents`, and installed Cursor plugins).
+  - Your team's commands from the Cursor dashboard, and Cursor's own commands for local agents: `/code-review`, `/explain`, `/read-branch`, `/simplify`, `/use-browser`, `/multi-model-review`, and, inside a git repository, `/worktree`, `/apply-worktree`, `/delete-worktree`, and `/best-of-n`. They join the menu a moment after the agent opens. A skill or command file with the same name takes precedence.
+  - `/plan`, `/compact`, `/review`, and `/commit` when nothing else uses those names. `/compact` summarizes the conversation.
 
 ## Sessions
 
@@ -42,6 +46,7 @@ The built-in provider is still the better fit if you want to approve each tool c
 
 - Prompts, attached images, the files and command output the agent's tools read, and the conversation go to Cursor under your account, as they do when you use Cursor directly.
 - A pasted API key is saved in this plugin's settings on the Paseo host, in plain text in the daemon's data folder. Apps connected to that host load it into the settings screen, where it stays masked. **Sign in with Cursor** saves the key in `~/.cursor/sdk/auth.json` on the daemon host.
+- To list team and Cursor commands, the plugin exchanges the key it runs with for a token at Cursor's backend and asks for both lists when an agent opens, at most once every 10 minutes per key.
 - Sessions are stored in SQLite databases under `~/.cursor/sdk/paseo-plugin/sqlite` on the daemon host, one per workspace folder. Set `CURSOR_SDK_STATE_ROOT` to move them.
 - The plugin writes local diagnostics, such as timings, connection events, and error details, to `~/.cursor/sdk/paseo-plugin/diagnostics`, with 14 days of retention and 64 MB per day. Diagnostics never contain prompts, output, or credentials, and are not sent anywhere. Set `CURSOR_PROVIDER_DIAGNOSTICS=0` to turn them off.
 
@@ -49,7 +54,7 @@ The built-in provider is still the better fit if you want to approve each tool c
 
 - Local SDK runs have no approval channel, so the agent never asks for permission. Use Plan or Auto-review to limit what it can do.
 - Revert rewinds the conversation only, not files.
-- Team commands from Cursor are not available as slash commands.
+- Team and Cursor commands come from an endpoint Cursor does not document. If it changes or fails, the menu shows only local skills and commands. `/multi-model-review`, `/simplify`, and `/best-of-n` are written for Cursor's own subagent tool, which this plugin replaces with Paseo agents when Paseo's tools are on.
 - An agent system prompt set in Paseo replaces Cursor's own system prompt.
 
 The [README](https://github.com/fidelix/fidelix-paseo-plugins/tree/main/plugins/cursor-sdk#readme) covers installation from source, the diagnostics format, and a comparison with the built-in Cursor provider.

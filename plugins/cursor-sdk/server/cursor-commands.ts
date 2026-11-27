@@ -9,7 +9,8 @@ import type { ProviderCommand } from "@getpaseo/plugin/server/provider";
  * `@cursor/sdk` has no command-list API. cursor-agent builds the same menu by
  * reading command markdown and `SKILL.md` files off disk (`loadCommands` with
  * `includeSkills`). Omitting that scan is why Paseo only ever showed the four
- * hardcoded helpers.
+ * hardcoded helpers. Team and Cursor commands come from the backend instead
+ * (cursor-remote-commands.ts) and are merged in after the session opens.
  */
 export interface CursorSlashEntry {
   name: string;
@@ -128,6 +129,23 @@ export async function discoverCursorSlashCatalog(
     if (!byName.has(builtin.name)) byName.set(builtin.name, { ...builtin });
   }
 
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Team and Cursor commands (cursor-remote-commands.ts) join the local catalog.
+ * A local skill or command file keeps its name, as in cursor-agent; remote
+ * entries only displace the fallback helpers.
+ */
+export function mergeRemoteSlashEntries(
+  local: readonly CursorSlashEntry[],
+  remote: readonly CursorSlashEntry[],
+): CursorSlashEntry[] {
+  const byName = new Map(local.map((entry) => [entry.name, entry]));
+  for (const entry of remote) {
+    const existing = byName.get(entry.name);
+    if (!existing || existing.kind === "builtin") byName.set(entry.name, entry);
+  }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
