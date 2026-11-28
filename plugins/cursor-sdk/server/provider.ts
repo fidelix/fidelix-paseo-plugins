@@ -93,6 +93,7 @@ import {
 } from "./mapping.js";
 import { readAgentContextWindow } from "./context-window.js";
 import { cancelRun } from "./run-cancel.js";
+import { sessionResourceProviderOptions } from "./session-env.js";
 import {
   classifyCursorError,
   DEFAULT_RETRY_POLICY,
@@ -2493,7 +2494,7 @@ function failureMessage(
 const CURSOR_SETTING_SOURCES = ["project", "user", "plugins"] as const;
 
 function cursorLocalOptions(
-  config: Pick<ProviderSessionConfig, "cwd">,
+  config: Pick<ProviderSessionConfig, "cwd" | "env">,
   store: CursorLocalAgentStore,
   autoReview: boolean,
   onConnectionStateChange: (change: CursorConnectionState) => void,
@@ -2503,6 +2504,7 @@ function cursorLocalOptions(
   settingSources: Array<(typeof CURSOR_SETTING_SOURCES)[number]>;
   autoReview: boolean;
   onConnectionStateChange: (change: CursorConnectionState) => void;
+  resourceProviderOptions: ReturnType<typeof sessionResourceProviderOptions>;
 } {
   return {
     cwd: config.cwd,
@@ -2510,6 +2512,7 @@ function cursorLocalOptions(
     settingSources: [...CURSOR_SETTING_SOURCES],
     autoReview,
     onConnectionStateChange,
+    resourceProviderOptions: sessionResourceProviderOptions(config.env),
   };
 }
 

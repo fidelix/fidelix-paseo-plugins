@@ -45,7 +45,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@cursor/sdk": "^1.4.2",
+    "@cursor/sdk": "1.5.2",
     "esbuild": "0.28.2",
     "zod": "4.4.3"
   }

@@ -285,6 +285,16 @@ jq -cs 'map(select(.kind=="loop_stall")) | sort_by(-.ms) | .[:10][] | {at,ms,sql
   `used_tokens` (`inputTokens` already includes cache reads and writes), so a
   long turn and an in-turn summary show live. A conversation that never
   checkpointed has no figure.
+- **The session env reaches the agent's shells.** Every session shares one
+  process, so the plugin can't set `process.env` per session. Each agent's
+  `local.resourceProviderOptions` carries `shellExtraEnvProvider`, and the
+  SDK's shell executor merges its result into every Shell command, so
+  `PASEO_AGENT_ID`, `PASEO_WORKSPACE_ID` and the profile env reach the
+  shell and whatever it starts (git hooks included). `CURSOR_API_KEY` and
+  `CURSOR_SDK_STATE_ROOT` are withheld. MCP servers the SDK launches don't
+  get it. The field is not in the SDK's types, so `@cursor/sdk` is pinned to
+  an exact version and `session-env.test.ts` fails if the installed SDK
+  stops reading it.
 - History replay on resume is best-effort (last ~20 messages) and never blocks
   session open.
 - **Cursor `task` subagents (fallback only) block their parent and can't be

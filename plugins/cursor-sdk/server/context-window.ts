@@ -10,7 +10,7 @@
 // ConversationStateStructure protobuf, and field 5 is ConversationTokenDetails
 // (`used_tokens`, `max_tokens`), the same accounting as the IDE context ring,
 // rewritten whenever the conversation state changes, including after a summary.
-// Field numbers are from @cursor/sdk 1.4.2, unchanged since 1.0.36
+// Field numbers are from @cursor/sdk 1.5.2, unchanged since 1.0.36
 // (agent.v1.ConversationTokenDetails).
 import type { CursorLocalAgentStore } from "./cursor-sdk-loader.js";
 
