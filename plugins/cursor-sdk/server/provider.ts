@@ -96,8 +96,10 @@ import { cancelRun } from "./run-cancel.js";
 import {
   classifyCursorError,
   DEFAULT_RETRY_POLICY,
-  retryDelayMs,
+  isCapacityError,
+  retryDelayFor,
   sleep,
+  type ClassifiedError,
   type RetryPolicy,
 } from "./retry.js";
 
@@ -1467,6 +1469,7 @@ function createConnection(
       attempt += 1;
       turnDiag.attempt(attempt);
       const delivery = { usage: false };
+      const attemptStartedAt = Date.now();
       try {
         await waitForPriorCancel(state);
         if (state.activeTurnId !== turnId || signal.aborted)
@@ -1537,16 +1540,23 @@ function createConnection(
             ? { message: result.error.message, code: result.error.code }
             : result.error,
         );
-        if (classified.retryable && attempt < retry.maxAttempts) {
+        const delay = retryDelayFor(
+          classified,
+          attempt,
+          Date.now() - attemptStartedAt,
+          retry,
+        );
+        if (delay !== undefined) {
           state.activeRun = null;
           turnDiag.note("plugin_retry", {
             attempt,
             error: classified.message,
             code: classified.code,
+            delayMs: delay,
           });
           emitRetryNotice(state, turnId, attempt, classified.message);
           try {
-            await sleep(retryDelayMs(attempt, retry), signal);
+            await sleep(delay, signal);
           } catch {
             if (signal.aborted) return { status: "cancelled" };
             throw new Error(classified.message);
@@ -1555,7 +1565,10 @@ function createConnection(
         }
         return {
           status: "error",
-          error: { message: classified.message, code: classified.code },
+          error: {
+            message: failureMessage(classified, Date.now() - attemptStartedAt),
+            code: classified.code,
+          },
         };
       } catch (error) {
         turnDiag.note("send_threw", { attempt, error: describeError(error) });
@@ -1569,15 +1582,22 @@ function createConnection(
           return { status: "finished" };
         }
         const classified = classifyCursorError(error);
-        if (classified.retryable && attempt < retry.maxAttempts) {
+        const delay = retryDelayFor(
+          classified,
+          attempt,
+          Date.now() - attemptStartedAt,
+          retry,
+        );
+        if (delay !== undefined) {
           turnDiag.note("plugin_retry", {
             attempt,
             error: classified.message,
             code: classified.code,
+            delayMs: delay,
           });
           emitRetryNotice(state, turnId, attempt, classified.message);
           try {
-            await sleep(retryDelayMs(attempt, retry), signal);
+            await sleep(delay, signal);
           } catch {
             if (signal.aborted) return { status: "cancelled" };
             throw error;
@@ -2456,6 +2476,15 @@ function createConnection(
 
 /** Pause after a failed catalog fetch (rate limit, outage) before calling again. */
 const CATALOG_RETRY_MS = 30_000;
+
+function failureMessage(
+  classified: ClassifiedError,
+  attemptMs: number,
+): string {
+  if (!isCapacityError(classified)) return classified.message;
+  const minutes = Math.max(1, Math.round(attemptMs / 60_000));
+  return `${classified.message}: the model's capacity on Cursor's side ran out after ${minutes} min. Try again later, compact the conversation, or switch models.`;
+}
 
 /**
  * With `settingSources` omitted the SDK loads no project, user, or plugin

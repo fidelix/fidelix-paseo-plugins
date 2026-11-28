@@ -4,9 +4,19 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error: `.ts` specifier required so node --test type-stripping resolves it (tsc Bundler mode maps extensionless/`.js`)
-import { DEFAULT_RETRY_POLICY, classifyCursorError, retryDelayMs, sleep } from "./retry.ts";
+import * as retry from "./retry.ts";
 // @ts-expect-error: same `.ts` specifier exemption for the sibling helper under test
 import { toProviderError } from "./mapping.ts";
+
+const {
+  CAPACITY_RETRY_DELAY_MS,
+  CAPACITY_RETRY_MAX_ATTEMPT_MS,
+  DEFAULT_RETRY_POLICY,
+  classifyCursorError,
+  retryDelayFor,
+  retryDelayMs,
+  sleep,
+} = retry;
 
 const RETRYABLE_CODES = [
   "resource_exhausted",
@@ -50,7 +60,13 @@ describe("classifyCursorError", () => {
   }
 
   it("matches retryable codes case-insensitively", () => {
-    for (const code of ["Resource_Exhausted", "TIMEOUT", "Rate_Limited", "INTERNAL", "Unavailable"]) {
+    for (const code of [
+      "Resource_Exhausted",
+      "TIMEOUT",
+      "Rate_Limited",
+      "INTERNAL",
+      "Unavailable",
+    ]) {
       const out = classifyCursorError({ code });
       assert.equal(out.retryable, true, code);
       assert.equal(out.code, code);
@@ -64,25 +80,54 @@ describe("classifyCursorError", () => {
   }
 
   it("never retries non-retryable codes even when isRetryable is true", () => {
-    for (const code of ["agent_busy", "canceled", "cancelled", "unauthenticated", "not_found", "bad_model_name"]) {
-      assert.equal(classifyCursorError({ code, isRetryable: true }).retryable, false, code);
+    for (const code of [
+      "agent_busy",
+      "canceled",
+      "cancelled",
+      "unauthenticated",
+      "not_found",
+      "bad_model_name",
+    ]) {
+      assert.equal(
+        classifyCursorError({ code, isRetryable: true }).retryable,
+        false,
+        code,
+      );
     }
   });
 
   it("retries retryable codes even when isRetryable is false", () => {
-    assert.equal(classifyCursorError({ code: "timeout", isRetryable: false }).retryable, true);
-    assert.equal(classifyCursorError({ code: "resource_exhausted", isRetryable: false }).retryable, true);
+    assert.equal(
+      classifyCursorError({ code: "timeout", isRetryable: false }).retryable,
+      true,
+    );
+    assert.equal(
+      classifyCursorError({ code: "resource_exhausted", isRetryable: false })
+        .retryable,
+      true,
+    );
   });
 
   it("falls back to the isRetryable flag for unknown codes", () => {
-    assert.equal(classifyCursorError({ code: "some_future_code", isRetryable: true }).retryable, true);
-    assert.equal(classifyCursorError({ code: "some_future_code", isRetryable: false }).retryable, false);
+    assert.equal(
+      classifyCursorError({ code: "some_future_code", isRetryable: true })
+        .retryable,
+      true,
+    );
+    assert.equal(
+      classifyCursorError({ code: "some_future_code", isRetryable: false })
+        .retryable,
+      false,
+    );
     const flagged = Object.assign(new Error("flagged"), { isRetryable: true });
     assert.equal(classifyCursorError(flagged).retryable, true);
   });
 
   it("defaults unknown errors to non-retryable", () => {
-    assert.equal(classifyCursorError({ code: "some_future_code" }).retryable, false);
+    assert.equal(
+      classifyCursorError({ code: "some_future_code" }).retryable,
+      false,
+    );
     assert.equal(classifyCursorError({}).retryable, false);
     assert.equal(classifyCursorError({ code: "" }).retryable, false);
     assert.equal(classifyCursorError({ code: "" }).code, undefined);
@@ -97,13 +142,17 @@ describe("classifyCursorError", () => {
     const out = classifyCursorError({ message: "AI Model Not Found" });
     assert.equal(out.retryable, false);
     assert.equal(out.message, "AI Model Not Found");
-    assert.deepEqual(toProviderError({ message: "AI Model Not Found" }), { message: "AI Model Not Found" });
+    assert.deepEqual(toProviderError({ message: "AI Model Not Found" }), {
+      message: "AI Model Not Found",
+    });
   });
 
   it("recovers the code from the observed local run failure", () => {
     const message = "[resource_exhausted] Error";
     assert.deepEqual(classifyCursorError({ message }), {
-      message, code: "resource_exhausted", retryable: true,
+      message,
+      code: "resource_exhausted",
+      retryable: true,
     });
   });
 
@@ -111,31 +160,55 @@ describe("classifyCursorError", () => {
     for (const error of [new Error("[UNAVAILABLE] Error"), "[timeout] Error"]) {
       assert.equal(classifyCursorError(error).retryable, true);
     }
-    assert.equal(classifyCursorError({ code: "", message: "[rate_limited] Error" }).retryable, true);
+    assert.equal(
+      classifyCursorError({ code: "", message: "[rate_limited] Error" })
+        .retryable,
+      true,
+    );
   });
 
   it("preserves non-retryable message codes even when flagged retryable", () => {
-    assert.deepEqual(classifyCursorError({ message: "[not_found] Error", isRetryable: true }), {
-      message: "[not_found] Error", code: "not_found", retryable: false,
-    });
+    assert.deepEqual(
+      classifyCursorError({ message: "[not_found] Error", isRetryable: true }),
+      {
+        message: "[not_found] Error",
+        code: "not_found",
+        retryable: false,
+      },
+    );
   });
 
   it("gives explicit codes precedence over message prefixes", () => {
     for (const code of ["not_found", "some_future_code"]) {
-      assert.deepEqual(classifyCursorError({ code, message: "[resource_exhausted] Error" }), {
-        message: "[resource_exhausted] Error", code, retryable: false,
-      });
+      assert.deepEqual(
+        classifyCursorError({ code, message: "[resource_exhausted] Error" }),
+        {
+          message: "[resource_exhausted] Error",
+          code,
+          retryable: false,
+        },
+      );
     }
   });
 
   it("does not infer codes from unknown prefixes or incidental mentions", () => {
-    for (const message of ["[some_future_code] Error", "tool output: [resource_exhausted] Error", "[resource_exhausted]suffix"]) {
-      assert.deepEqual(classifyCursorError({ message }), { message, code: undefined, retryable: false });
+    for (const message of [
+      "[some_future_code] Error",
+      "tool output: [resource_exhausted] Error",
+      "[resource_exhausted]suffix",
+    ]) {
+      assert.deepEqual(classifyCursorError({ message }), {
+        message,
+        code: undefined,
+        retryable: false,
+      });
     }
   });
 
   it("preserves message and code", () => {
-    const err = Object.assign(new Error("rate limited, slow down"), { code: "rate_limited" });
+    const err = Object.assign(new Error("rate limited, slow down"), {
+      code: "rate_limited",
+    });
     const out = classifyCursorError(err);
     assert.equal(out.message, "rate limited, slow down");
     assert.equal(out.code, "rate_limited");
@@ -153,7 +226,11 @@ describe("retryDelayMs", () => {
   });
 
   it("exposes the documented default policy", () => {
-    assert.deepEqual(DEFAULT_RETRY_POLICY, { maxAttempts: 3, baseDelayMs: 1000, maxDelayMs: 15000 });
+    assert.deepEqual(DEFAULT_RETRY_POLICY, {
+      maxAttempts: 3,
+      baseDelayMs: 1000,
+      maxDelayMs: 15000,
+    });
   });
 
   it("honors a custom policy", () => {
@@ -180,5 +257,44 @@ describe("sleep", () => {
     const pending = sleep(10_000, controller.signal);
     controller.abort();
     await assert.rejects(() => pending, /aborted/i);
+  });
+});
+
+describe("retryDelayFor", () => {
+  const exhausted = classifyCursorError({
+    message: "[resource_exhausted] Error",
+  });
+  const unavailable = classifyCursorError({
+    code: "unavailable",
+    message: "x",
+  });
+
+  it("resends a fast capacity refusal once, after the capacity delay", () => {
+    assert.equal(retryDelayFor(exhausted, 1, 5_000), CAPACITY_RETRY_DELAY_MS);
+    assert.equal(retryDelayFor(exhausted, 2, 5_000), undefined);
+  });
+
+  it("fails a capacity error that ended a long attempt", () => {
+    assert.equal(
+      retryDelayFor(exhausted, 1, CAPACITY_RETRY_MAX_ATTEMPT_MS),
+      undefined,
+    );
+    assert.equal(retryDelayFor(exhausted, 1, 21 * 60_000), undefined);
+  });
+
+  it("keeps the normal backoff for transport errors, however long the attempt", () => {
+    assert.equal(retryDelayFor(unavailable, 1, 21 * 60_000), retryDelayMs(1));
+    assert.equal(retryDelayFor(unavailable, 2, 5_000), retryDelayMs(2));
+    assert.equal(
+      retryDelayFor(unavailable, DEFAULT_RETRY_POLICY.maxAttempts, 5_000),
+      undefined,
+    );
+  });
+
+  it("never resends non-retryable errors", () => {
+    assert.equal(
+      retryDelayFor(classifyCursorError({ code: "unauthenticated" }), 1, 1_000),
+      undefined,
+    );
   });
 });

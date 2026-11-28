@@ -115,6 +115,49 @@ export function classifyCursorError(error: unknown): ClassifiedError {
   return { message, code, retryable: false };
 }
 
+const CAPACITY_CODES = new Set([
+  "resource_exhausted",
+  "rate_limited",
+  "rate_limited_changeable",
+  "free_user_rate_limit_exceeded",
+  "pro_user_rate_limit_exceeded",
+  "free_user_usage_limit",
+  "pro_user_usage_limit",
+  "generic_rate_limit_exceeded",
+  "gpt_4_vision_preview_rate_limit",
+  "api_key_rate_limit",
+  "openai_rate_limit_exceeded",
+  "rate_limit_exceeded",
+]);
+
+/**
+ * A capacity failure is resent once, and only when the backend refused fast.
+ * The SDK already waits out rate limits (up to 5 min) and reconnects stalled
+ * streams before a run fails, so a long attempt that ends in
+ * `resource_exhausted` has spent that budget; resending repeats the whole wait.
+ */
+export const CAPACITY_RETRY_MAX_ATTEMPT_MS = 60_000;
+export const CAPACITY_RETRY_DELAY_MS = 15_000;
+
+export function isCapacityError(classified: ClassifiedError): boolean {
+  const code = classified.code?.toLowerCase();
+  return code !== undefined && CAPACITY_CODES.has(code);
+}
+
+/** Delay before resending the turn, or undefined to fail it now. */
+export function retryDelayFor(
+  classified: ClassifiedError,
+  attempt: number,
+  attemptMs: number,
+  policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+): number | undefined {
+  if (!classified.retryable || attempt >= policy.maxAttempts) return undefined;
+  if (!isCapacityError(classified)) return retryDelayMs(attempt, policy);
+  if (attempt > 1 || attemptMs >= CAPACITY_RETRY_MAX_ATTEMPT_MS)
+    return undefined;
+  return CAPACITY_RETRY_DELAY_MS;
+}
+
 export interface RetryPolicy {
   maxAttempts: number;
   baseDelayMs: number;
@@ -133,7 +176,10 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
  * (relay-transport caps at 30s; opencode stop-status polling doubles with a
  * cap). No jitter: provider retries are low-frequency and user-visible.
  */
-export function retryDelayMs(attempt: number, policy: RetryPolicy = DEFAULT_RETRY_POLICY): number {
+export function retryDelayMs(
+  attempt: number,
+  policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+): number {
   return Math.min(policy.baseDelayMs * 2 ** (attempt - 1), policy.maxDelayMs);
 }
 
